@@ -2471,7 +2471,7 @@ function updateWeather(speedMul, W, H) {
   weather.timer += speedMul;
   if (weather.timer > weather.duration) {
     weather.timer = 0;
-    weather.duration = rand(600, 1500);
+    weather.duration = rand(400, 1000);
     // pick next weather — spring showers are frequent
     const roll = Math.random();
     if (roll < 0.3) weather.target = WEATHER.CLEAR;
@@ -2482,10 +2482,10 @@ function updateWeather(speedMul, W, H) {
 
   // smooth transition
   const targetOverlay = [0, 0.2, 0.35, 0.5][weather.target];
-  weather.overlay += (targetOverlay - weather.overlay) * 0.02 * speedMul;
-  weather.current = weather.overlay < 0.1 ? WEATHER.CLEAR :
-                    weather.overlay < 0.25 ? WEATHER.CLOUDY :
-                    weather.overlay < 0.4 ? WEATHER.RAIN : WEATHER.STORM;
+  weather.overlay += (targetOverlay - weather.overlay) * 0.03 * speedMul;
+  weather.current = weather.overlay < 0.08 ? WEATHER.CLEAR :
+                    weather.overlay < 0.18 ? WEATHER.CLOUDY :
+                    weather.overlay < 0.32 ? WEATHER.RAIN : WEATHER.STORM;
 
   // rain
   const targetRainCount = weather.current >= WEATHER.RAIN ? (weather.current === WEATHER.STORM ? 300 : 150) : 0;
@@ -2723,9 +2723,9 @@ function animate() {
 
   // update flee factor before any creature rendering
   if (creaturesHiding) {
-    fleeFactor = Math.min(1, fleeFactor + 0.008 * speedMul);
+    fleeFactor = Math.min(1, fleeFactor + 0.02 * speedMul);
   } else {
-    fleeFactor = Math.max(0, fleeFactor - 0.015 * speedMul);
+    fleeFactor = Math.max(0, fleeFactor - 0.025 * speedMul);
   }
 
   // ground animals BEFORE flowers so flowers cover their feet naturally
@@ -2733,29 +2733,29 @@ function animate() {
     squirrels.forEach(sq => { sq.update(speedMul); sq.draw(ctx); });
     rabbits.forEach(rb => { rb.update(speedMul); rb.draw(ctx); });
   } else {
-    // ground creatures run away naturally (drawn before flowers to keep layering)
+    // ground creatures run away — move directly, skip normal update to prevent pausing/reversing
     const urgencyGround = fleeFactor * fleeFactor;
     squirrels.forEach(sq => {
       if (!sq._fleeing) {
         sq._fleeing = true;
-        sq.isPaused = false;
-        sq.dir = sq.x < W * 0.5 ? -1 : 1;
-        sq._origSpeed = sq.speed;
+        sq._fleeDir = sq.x < W * 0.5 ? -1 : 1;
       }
-      sq.speed = sq._origSpeed * (1.5 + urgencyGround * 1.5);
-      sq.update(speedMul);
+      const fleeSpeed = (2 + urgencyGround * 4) * speedMul;
+      sq.x += sq._fleeDir * fleeSpeed;
+      sq.runPhase += 0.2 * speedMul;
+      sq.tailPhase += 0.1 * speedMul;
       if (sq.x > -sq.size * 3 && sq.x < W + sq.size * 3) sq.draw(ctx);
     });
     rabbits.forEach(rb => {
       if (!rb._fleeing) {
         rb._fleeing = true;
-        rb.isPaused = false;
+        rb._fleeDir = rb.x < W * 0.5 ? -1 : 1;
         rb.isHopping = true;
-        rb.dir = rb.x < W * 0.5 ? -1 : 1;
-        rb._origSpeed = rb.speed;
       }
-      rb.speed = rb._origSpeed * (1.5 + urgencyGround * 1.5);
-      rb.update(speedMul);
+      const fleeSpeed = (1.5 + urgencyGround * 3.5) * speedMul;
+      rb.x += rb._fleeDir * fleeSpeed;
+      rb.hopPhase += 0.25 * speedMul;
+      rb.dir = rb._fleeDir;
       if (rb.x > -rb.size * 3 && rb.x < W + rb.size * 3) rb.draw(ctx);
     });
   }
@@ -2788,51 +2788,33 @@ function animate() {
     const _flee = (c) => {
       if (c._fleeing) return;
       c._fleeing = true;
-      if (c.resting) c.resting = false;
-      const awayX = c.x < W * 0.5 ? -1 : 1;
-      c._fleeAngle = Math.atan2(-1, awayX) + rand(-0.6, 0.6);
-      c._fleeSpeed = rand(0.8, 1.4);
+      c.resting = false;
+      c.targetFlower = null;
+      // random direction, biased upward but scattered
+      c._fleeAngle = rand(-Math.PI, 0) + rand(-0.4, 0.4);
+      c._fleeSpeed = rand(0.6, 1.2);
     };
 
-    for (const c of butterflies) {
-      _flee(c); c.update(speedMul, time);
-      const amt = urgency * 3 * c._fleeSpeed * speedMul;
+    const _fleeMove = (c, speed) => {
+      _flee(c);
+      const amt = urgency * speed * c._fleeSpeed * speedMul;
       c.x += Math.cos(c._fleeAngle) * amt;
       c.y += Math.sin(c._fleeAngle) * amt;
+      if (c.wingPhase !== undefined) c.wingPhase += (c.wingSpeed || 0.15) * speedMul;
       if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
-    }
-    for (const c of bees) {
-      _flee(c); c.update(speedMul, time);
-      const amt = urgency * 4 * c._fleeSpeed * speedMul;
-      c.x += Math.cos(c._fleeAngle) * amt;
-      c.y += Math.sin(c._fleeAngle) * amt;
-      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
-    }
-    for (const c of ladybugs) {
-      _flee(c); c.update(speedMul, time);
-      const amt = urgency * 2 * c._fleeSpeed * speedMul;
-      c.x += Math.cos(c._fleeAngle) * amt;
-      c.y += Math.sin(c._fleeAngle) * amt;
-      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
-    }
-    for (const c of dragonflies) {
-      _flee(c); c.update(speedMul);
-      const amt = urgency * 5 * c._fleeSpeed * speedMul;
-      c.x += Math.cos(c._fleeAngle) * amt;
-      c.y += Math.sin(c._fleeAngle) * amt;
-      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
-    }
+    };
+
+    for (const c of butterflies) _fleeMove(c, 3);
+    for (const c of bees) _fleeMove(c, 4);
+    for (const c of ladybugs) _fleeMove(c, 2);
+    for (const c of dragonflies) _fleeMove(c, 5);
     for (const b of birds) {
       if (b.state === 'perched') {
         if (b.perchTree && b.perchIdx >= 0) b.perchTree.perchPoints[b.perchIdx].occupied = false;
         b.state = 'flying';
         b.speed = (Math.random() < 0.5 ? 1 : -1) * rand(2, 3.5);
       }
-      _flee(b); b.update(speedMul);
-      const amt = urgency * 5 * b._fleeSpeed * speedMul;
-      b.x += Math.cos(b._fleeAngle) * amt;
-      b.y += Math.sin(b._fleeAngle) * amt;
-      if (b.y > -150 && b.x > -150 && b.x < W + 150) b.draw(ctx);
+      _fleeMove(b, 5);
     }
     // ground creatures handled in earlier block (before flowers)
   }
