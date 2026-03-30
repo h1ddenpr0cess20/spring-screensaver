@@ -1,0 +1,2591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spring Meadow</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; width: 100vw; height: 100vh; }
+    canvas { display: block; }
+    .controls {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 8px 16px;
+      color: #ddd;
+      font-family: monospace;
+      font-size: 13px;
+      backdrop-filter: blur(6px);
+    }
+    input[type=range] { accent-color: #7c3; width: 120px; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="controls">
+  <label for="speed">Speed: <span id="speedVal">1.0</span>x</label>
+  <input type="range" id="speed" min="0.1" max="3" step="0.1" value="1" />
+</div>
+<script>
+/* ── helpers ─────────────────────────────────────────── */
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/* ── sky gradient (time-of-day cycle) ────────────────── */
+let skyPhase = 0;
+function skyColor(t) {
+  // t in [0,1] cycles through a gentle day palette
+  const colors = [
+    [0.53, 0.81, 0.98],  // light blue
+    [0.40, 0.70, 0.92],  // medium blue
+    [0.55, 0.83, 0.78],  // teal hint
+    [0.60, 0.85, 0.95],  // pale sky
+  ];
+  const idx = t * colors.length;
+  const i = Math.floor(idx) % colors.length;
+  const j = (i + 1) % colors.length;
+  const f = idx - Math.floor(idx);
+  const r = Math.floor(lerp(colors[i][0], colors[j][0], f) * 255);
+  const g = Math.floor(lerp(colors[i][1], colors[j][1], f) * 255);
+  const b = Math.floor(lerp(colors[i][2], colors[j][2], f) * 255);
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ── wind field ──────────────────────────────────────── */
+let windX = 0.8, windY = -0.2;
+let windTime = 0;
+function updateWind(dt) {
+  windTime += dt;
+  windX = 0.6 + 0.4 * Math.sin(windTime * 0.3) + 0.2 * Math.sin(windTime * 0.7);
+  windY = -0.15 + 0.15 * Math.sin(windTime * 0.5);
+}
+
+/* ── Grass Blade (natural, multi-segment, tapered) ───── */
+class GrassBlade {
+  constructor(x, baseY, h) {
+    this.x = x;
+    this.baseY = baseY;
+    this.h = h;
+    this.hue = 75 + rand(-10, 30);
+    this.sat = 40 + rand(-5, 30);
+    this.lit = 25 + rand(-5, 20);
+    this.swayOffset = rand(0, TAU);
+    this.swayAmp = rand(0.03, 0.12);
+    this.baseWidth = rand(1.5, 6);
+    // natural curve — slight S or lean
+    this.lean = rand(-0.3, 0.3);
+    this.curl = rand(-0.15, 0.15);
+  }
+  draw(ctx, time) {
+    const sway = Math.sin(time * 1.2 + this.swayOffset) * this.swayAmp * this.h;
+    const windPush = windX * this.h * 0.04;
+    const tipX = this.x + sway + windPush + this.lean * this.h;
+    const midX = this.x + (sway + windPush) * 0.4 + this.lean * this.h * 0.3 + this.curl * this.h;
+
+    // draw as a filled tapered shape for natural look
+    const segs = 8;
+    const pts = [];
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const px = this.x + (midX - this.x) * t * 2 * (t < 0.5 ? 1 : 0) +
+                 (t >= 0.5 ? midX + (tipX - midX) * ((t - 0.5) * 2) : 0);
+      // simpler: quadratic interp
+      const bx = (1 - t) * (1 - t) * this.x + 2 * (1 - t) * t * midX + t * t * tipX;
+      const by = this.baseY - this.h * t;
+      const w = this.baseWidth * (1 - t * 0.85); // taper
+      pts.push({ x: bx, y: by, w });
+    }
+
+    // fill as a ribbon
+    ctx.fillStyle = `hsl(${this.hue}, ${this.sat}%, ${this.lit}%)`;
+    ctx.beginPath();
+    // left edge going up
+    ctx.moveTo(pts[0].x - pts[0].w * 0.5, pts[0].y);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i].x - pts[i].w * 0.5, pts[i].y);
+    }
+    // tip
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y - 1);
+    // right edge going down
+    for (let i = pts.length - 1; i >= 0; i--) {
+      ctx.lineTo(pts[i].x + pts[i].w * 0.5, pts[i].y);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // subtle center vein highlight
+    ctx.strokeStyle = `hsla(${this.hue}, ${this.sat - 10}%, ${this.lit + 12}%, 0.3)`;
+    ctx.lineWidth = 0.4;
+    ctx.beginPath();
+    ctx.moveTo(this.x, this.baseY);
+    ctx.quadraticCurveTo(midX, this.baseY - this.h * 0.5, tipX, this.baseY - this.h);
+    ctx.stroke();
+  }
+}
+
+/* ── Flower (multiple shape types, large size variety) ── */
+class Flower {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset();
+  }
+  reset() {
+    this.x = rand(5, this.screenW - 5);
+    this.groundY = this.screenH + rand(0, 20);
+    this.stemH = rand(25, 200);
+    // flower type: daisy, tulip, rose, sunflower, poppy, bellflower, wildflower
+    this.type = pick(['daisy', 'daisy', 'tulip', 'rose', 'sunflower', 'poppy', 'bell', 'wild', 'wild', 'daisy']);
+    this.petalHue = this._pickHue();
+    this.petalSat = rand(55, 100);
+    this.petalLit = rand(48, 82);
+    this.petalSize = this._pickSize();
+    this.petalCount = this._pickPetalCount();
+    this.centerSize = this.petalSize * rand(0.2, 0.5);
+    this.centerColor = pick(['#f5d020', '#e8a000', '#fff5b0', '#f0e060', '#8b6914']);
+    this.swayOffset = rand(0, TAU);
+    this.bloomPhase = 0;
+    this.bloomSpeed = rand(0.002, 0.008);
+    this.stemCurve = rand(-25, 25);
+    this.stemWidth = rand(2, 5);
+    this.stemHue = 85 + rand(-15, 20);
+    this.leafCount = Math.floor(rand(1, 4));
+    this.leafPositions = [];
+    for (let i = 0; i < this.leafCount; i++) {
+      this.leafPositions.push({
+        t: rand(0.25, 0.7),
+        side: Math.random() < 0.5 ? 1 : -1,
+        size: rand(8, 18),
+        angle: rand(0.2, 0.8),
+      });
+    }
+    this.age = 0;
+    this.maxAge = rand(400, 900);
+    this.fadeAlpha = 1;
+    this.dead = false;
+  }
+  _pickHue() {
+    const hues = {
+      daisy: pick([0, 30, 45, 280, 300, 330, 50, 60]),
+      tulip: pick([0, 15, 330, 340, 280, 300, 45, 50]),
+      rose: pick([340, 350, 0, 10, 320, 280]),
+      sunflower: pick([40, 45, 50, 55]),
+      poppy: pick([0, 10, 15, 350, 30]),
+      bell: pick([230, 250, 270, 280, 200]),
+      wild: pick([280, 300, 320, 45, 60, 180, 200, 30, 350]),
+    };
+    return hues[this.type] || rand(0, 360);
+  }
+  _pickSize() {
+    // big variety: tiny wildflowers to huge sunflowers
+    const sizes = {
+      daisy: rand(8, 28),
+      tulip: rand(12, 30),
+      rose: rand(14, 35),
+      sunflower: rand(22, 50),
+      poppy: rand(12, 32),
+      bell: rand(8, 22),
+      wild: rand(5, 18),
+    };
+    return sizes[this.type] || rand(8, 25);
+  }
+  _pickPetalCount() {
+    const counts = {
+      daisy: Math.floor(rand(8, 16)),
+      tulip: Math.floor(rand(5, 7)),
+      rose: Math.floor(rand(12, 22)),
+      sunflower: Math.floor(rand(16, 26)),
+      poppy: Math.floor(rand(4, 7)),
+      bell: 1,
+      wild: Math.floor(rand(4, 8)),
+    };
+    return counts[this.type] || Math.floor(rand(5, 10));
+  }
+  update(speedMul) {
+    this.bloomPhase = Math.min(1, this.bloomPhase + this.bloomSpeed * speedMul);
+    this.age += speedMul;
+    if (this.age > this.maxAge) {
+      this.fadeAlpha = Math.max(0, this.fadeAlpha - 0.008 * speedMul);
+      if (this.fadeAlpha <= 0) this.dead = true;
+    }
+  }
+  draw(ctx, time) {
+    if (this.fadeAlpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = this.fadeAlpha;
+    const sway = Math.sin(time * 1.0 + this.swayOffset) * 6 * (this.stemH / 140);
+    const tipX = this.x + sway + this.stemCurve * 0.3;
+    const tipY = this.groundY - this.stemH;
+
+    // stem — tapered
+    ctx.strokeStyle = `hsl(${this.stemHue}, 55%, 28%)`;
+    ctx.lineWidth = this.stemWidth;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(this.x, this.groundY);
+    ctx.quadraticCurveTo(this.x + this.stemCurve, this.groundY - this.stemH * 0.5, tipX, tipY);
+    ctx.stroke();
+    // thinner upper stem
+    ctx.lineWidth = this.stemWidth * 0.6;
+    ctx.strokeStyle = `hsl(${this.stemHue}, 50%, 32%)`;
+    ctx.beginPath();
+    const midStemX = this.x + this.stemCurve * 0.5 + sway * 0.3;
+    ctx.moveTo(midStemX, this.groundY - this.stemH * 0.45);
+    ctx.quadraticCurveTo(tipX - sway * 0.1, tipY + this.stemH * 0.15, tipX, tipY);
+    ctx.stroke();
+
+    // leaves on stem
+    for (const leaf of this.leafPositions) {
+      const ly = this.groundY - this.stemH * leaf.t;
+      const lt = leaf.t;
+      const lx = (1-lt)*(1-lt)*this.x + 2*(1-lt)*lt*(this.x + this.stemCurve) + lt*lt*tipX;
+      ctx.fillStyle = `hsl(${this.stemHue + rand(-5,5)}, 50%, ${30 + rand(-3,5)}%)`;
+      ctx.save();
+      ctx.translate(lx, ly);
+      ctx.rotate(leaf.angle * leaf.side + Math.sin(time * 0.8 + this.swayOffset + leaf.t) * 0.1);
+      ctx.scale(leaf.side, 1);
+      // pointed leaf shape
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.bezierCurveTo(leaf.size * 0.3, -leaf.size * 0.25, leaf.size * 0.8, -leaf.size * 0.15, leaf.size, 0);
+      ctx.bezierCurveTo(leaf.size * 0.8, leaf.size * 0.15, leaf.size * 0.3, leaf.size * 0.2, 0, 0);
+      ctx.fill();
+      // leaf vein
+      ctx.strokeStyle = `hsl(${this.stemHue}, 40%, 35%)`;
+      ctx.lineWidth = 0.4;
+      ctx.beginPath();
+      ctx.moveTo(1, 0);
+      ctx.lineTo(leaf.size * 0.85, 0);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // flower head
+    if (this.bloomPhase > 0.05) {
+      const bloom = this.bloomPhase;
+      const ps = this.petalSize * bloom;
+      ctx.save();
+      ctx.translate(tipX, tipY);
+
+      switch (this.type) {
+        case 'daisy':
+        case 'wild':
+          this._drawDaisy(ctx, ps, bloom, time);
+          break;
+        case 'tulip':
+          this._drawTulip(ctx, ps, bloom, time);
+          break;
+        case 'rose':
+          this._drawRose(ctx, ps, bloom, time);
+          break;
+        case 'sunflower':
+          this._drawSunflower(ctx, ps, bloom, time);
+          break;
+        case 'poppy':
+          this._drawPoppy(ctx, ps, bloom, time);
+          break;
+        case 'bell':
+          this._drawBell(ctx, ps, bloom, time);
+          break;
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  _drawDaisy(ctx, ps, bloom, time) {
+    for (let i = 0; i < this.petalCount; i++) {
+      const a = (i / this.petalCount) * TAU + Math.sin(time * 0.8 + this.swayOffset) * 0.05;
+      ctx.save();
+      ctx.rotate(a);
+      ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.88)`;
+      ctx.beginPath();
+      // rounded petal with slight point
+      ctx.moveTo(2, 0);
+      ctx.bezierCurveTo(ps * 0.3, -ps * 0.3, ps * 0.8, -ps * 0.35, ps * 1.1, -ps * 0.05);
+      ctx.bezierCurveTo(ps * 1.15, ps * 0.05, ps * 0.8, ps * 0.35, ps * 0.3, ps * 0.3);
+      ctx.lineTo(2, 0);
+      ctx.fill();
+      ctx.strokeStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 20}%, 0.2)`;
+      ctx.lineWidth = 0.4;
+      ctx.beginPath();
+      ctx.moveTo(3, 0);
+      ctx.lineTo(ps * 0.9, 0);
+      ctx.stroke();
+      ctx.restore();
+    }
+    // center
+    ctx.fillStyle = this.centerColor;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.centerSize * bloom, 0, TAU);
+    ctx.fill();
+    // center seeds
+    ctx.fillStyle = 'rgba(100,70,0,0.35)';
+    const seedCount = Math.floor(this.centerSize * bloom * 1.5);
+    for (let i = 0; i < seedCount; i++) {
+      const sa = (i / seedCount) * TAU + 0.5;
+      const sr = this.centerSize * bloom * (0.2 + (i % 3) * 0.2);
+      ctx.beginPath();
+      ctx.arc(Math.cos(sa) * sr, Math.sin(sa) * sr, 0.8 + bloom * 0.4, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  _drawTulip(ctx, ps, bloom, time) {
+    // cup-shaped petals overlapping
+    for (let i = 0; i < this.petalCount; i++) {
+      const a = (i / this.petalCount) * TAU;
+      const spread = bloom * 0.35; // tulips don't open wide
+      ctx.save();
+      ctx.rotate(a);
+      const litShift = i % 2 === 0 ? 0 : 8;
+      ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit + litShift}%, 0.9)`;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.bezierCurveTo(
+        ps * 0.25 * spread, -ps * 0.6,
+        ps * 0.5, -ps * 1.2,
+        ps * 0.1, -ps * 1.4
+      );
+      ctx.bezierCurveTo(
+        -ps * 0.15, -ps * 1.2,
+        -ps * 0.25 * spread, -ps * 0.5,
+        0, 0
+      );
+      ctx.fill();
+      ctx.strokeStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 15}%, 0.15)`;
+      ctx.lineWidth = 0.4;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  _drawRose(ctx, ps, bloom, time) {
+    // layered spiral petals
+    const layers = 3;
+    for (let layer = layers - 1; layer >= 0; layer--) {
+      const layerScale = 0.5 + layer * 0.3;
+      const layerRot = layer * 0.3;
+      const count = Math.floor(this.petalCount / layers) + (layer === 0 ? 2 : 0);
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * TAU + layerRot;
+        ctx.save();
+        ctx.rotate(a);
+        const litAdj = layer * 6;
+        ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - litAdj}%, 0.85)`;
+        const rps = ps * layerScale;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.bezierCurveTo(rps * 0.4, -rps * 0.3, rps * 0.7, -rps * 0.5, rps * 0.6, -rps * 0.05);
+        ctx.bezierCurveTo(rps * 0.5, rps * 0.2, rps * 0.2, rps * 0.15, 0, 0);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    // tight center
+    ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 15}%, 0.9)`;
+    ctx.beginPath();
+    ctx.arc(0, 0, ps * 0.12 * bloom, 0, TAU);
+    ctx.fill();
+  }
+
+  _drawSunflower(ctx, ps, bloom, time) {
+    // two layers of long thin petals
+    for (let layer = 0; layer < 2; layer++) {
+      const rot = layer * (TAU / this.petalCount / 2);
+      const litAdj = layer * 10;
+      for (let i = 0; i < this.petalCount; i++) {
+        const a = (i / this.petalCount) * TAU + rot + Math.sin(time * 0.5 + this.swayOffset) * 0.03;
+        ctx.save();
+        ctx.rotate(a);
+        ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - litAdj}%, 0.9)`;
+        ctx.beginPath();
+        // long narrow petal
+        ctx.moveTo(2, 0);
+        ctx.bezierCurveTo(ps * 0.3, -ps * 0.18, ps * 0.85, -ps * 0.15, ps * 1.3, 0);
+        ctx.bezierCurveTo(ps * 0.85, ps * 0.15, ps * 0.3, ps * 0.18, 2, 0);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    // big dark center
+    const cr = this.centerSize * bloom * 1.2;
+    const cg = ctx.createRadialGradient(0, 0, cr * 0.2, 0, 0, cr);
+    cg.addColorStop(0, '#5a3a10');
+    cg.addColorStop(0.5, '#3a2508');
+    cg.addColorStop(1, '#2a1a05');
+    ctx.fillStyle = cg;
+    ctx.beginPath();
+    ctx.arc(0, 0, cr, 0, TAU);
+    ctx.fill();
+    // seed spiral pattern
+    ctx.fillStyle = 'rgba(180,140,40,0.3)';
+    const seeds = Math.floor(cr * 3);
+    for (let i = 0; i < seeds; i++) {
+      const sa = i * 2.4; // golden angle
+      const sr = cr * 0.15 * Math.sqrt(i / seeds) * 2.8;
+      ctx.beginPath();
+      ctx.arc(Math.cos(sa) * sr, Math.sin(sa) * sr, 0.8 + cr * 0.02, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  _drawPoppy(ctx, ps, bloom, time) {
+    // wide crinkled petals
+    for (let i = 0; i < this.petalCount; i++) {
+      const a = (i / this.petalCount) * TAU;
+      ctx.save();
+      ctx.rotate(a);
+      ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.88)`;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      // wide ruffled shape
+      ctx.bezierCurveTo(ps * 0.5, -ps * 0.6, ps * 1.0, -ps * 0.7, ps * 1.1, -ps * 0.1);
+      ctx.bezierCurveTo(ps * 1.1, ps * 0.3, ps * 0.6, ps * 0.6, 0, 0);
+      ctx.fill();
+      // dark base blotch
+      ctx.fillStyle = `hsla(0, 0%, 8%, 0.4)`;
+      ctx.beginPath();
+      ctx.arc(ps * 0.25, 0, ps * 0.18, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+    // fuzzy center
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath();
+    ctx.arc(0, 0, ps * 0.18 * bloom, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#4a6a20';
+    ctx.beginPath();
+    ctx.arc(0, 0, ps * 0.1 * bloom, 0, TAU);
+    ctx.fill();
+  }
+
+  _drawBell(ctx, ps, bloom, time) {
+    // hanging bell shape
+    ctx.save();
+    ctx.rotate(Math.sin(time * 0.6 + this.swayOffset) * 0.15);
+    const bw = ps * 0.8 * bloom;
+    const bh = ps * 1.3 * bloom;
+    ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.85)`;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-bw * 0.3, bh * 0.2, -bw * 0.7, bh * 0.6, -bw * 0.6, bh);
+    // scalloped bottom edge
+    const scallops = 5;
+    for (let i = 0; i <= scallops; i++) {
+      const sx = -bw * 0.6 + (bw * 1.2) * (i / scallops);
+      const sy = bh + Math.sin(i * Math.PI / scallops * 2) * ps * 0.12;
+      ctx.lineTo(sx, sy);
+    }
+    ctx.bezierCurveTo(bw * 0.7, bh * 0.6, bw * 0.3, bh * 0.2, 0, 0);
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 18}%, 0.3)`;
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+    // inner shadow
+    const ig = ctx.createLinearGradient(0, 0, 0, bh);
+    ig.addColorStop(0, 'rgba(0,0,0,0)');
+    ig.addColorStop(0.7, `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 20}%, 0.3)`);
+    ig.addColorStop(1, 'rgba(0,0,0,0.1)');
+    ctx.fillStyle = ig;
+    ctx.fill();
+    // stamen
+    ctx.strokeStyle = '#e8d060';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(0, bh * 0.4);
+    ctx.lineTo(0, bh * 1.05);
+    ctx.stroke();
+    ctx.fillStyle = '#c8a020';
+    ctx.beginPath();
+    ctx.arc(0, bh * 1.05, 1.5, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+/* ── Butterfly (vertical wings, proper forewing + hindwing) ── */
+class Butterfly {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(16, 32);
+    this.speed = rand(0.6, 2.0);
+    this.wingPhase = rand(0, TAU);
+    this.wingSpeed = rand(0.08, 0.14);
+    this.hue1 = rand(0, 360);
+    this.hue2 = this.hue1 + rand(20, 60);
+    this.sat = rand(65, 100);
+    this.lit = rand(50, 70);
+    this.hasEyeSpots = Math.random() < 0.4;
+    this.wanderPhase = rand(0, TAU);
+    this.wanderFreq = rand(0.3, 0.8);
+    this.baseSpeedX = rand(-0.3, 0.5);
+    this.baseSpeedY = rand(-0.4, -0.1);
+    // resting on flowers
+    this.resting = false;
+    this.restTimer = 0;
+    this.restDuration = rand(150, 500);
+    this.restFlower = null;
+    this.restCooldown = 0;
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(this.screenH * 0.1, this.screenH * 0.75);
+    } else {
+      const side = Math.floor(rand(0, 4));
+      if (side === 0) { this.x = -this.size * 3; this.y = rand(0, this.screenH * 0.7); }
+      else if (side === 1) { this.x = this.screenW + this.size * 3; this.y = rand(0, this.screenH * 0.7); }
+      else if (side === 2) { this.x = rand(0, this.screenW); this.y = -this.size * 3; }
+      else { this.x = rand(0, this.screenW); this.y = this.screenH + this.size * 3; }
+    }
+  }
+  tryRest(flowersArr) {
+    if (this.resting || this.restCooldown > 0 || Math.random() > 0.004) return;
+    for (const f of flowersArr) {
+      if (f.bloomPhase < 0.7 || f.dead || f.fadeAlpha < 0.5) continue;
+      const tipX = f.x + f.stemCurve * 0.3;
+      const tipY = f.groundY - f.stemH;
+      const dx = tipX - this.x, dy = tipY - this.y;
+      if (dx * dx + dy * dy < 150 * 150) {
+        this.resting = true;
+        this.restTimer = 0;
+        this.restFlower = f;
+        this.x = tipX;
+        this.y = tipY - f.petalSize * 0.3;
+        return;
+      }
+    }
+  }
+  update(speedMul, time) {
+    this.restCooldown = Math.max(0, this.restCooldown - speedMul);
+
+    if (this.resting) {
+      this.restTimer += speedMul;
+      // gently close wings while resting
+      this.wingPhase += this.wingSpeed * 0.1 * speedMul;
+      // follow flower sway
+      if (this.restFlower) {
+        const sway = Math.sin(time * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
+        this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3;
+        this.y = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.3;
+        if (this.restFlower.dead || this.restFlower.fadeAlpha < 0.3) {
+          this.resting = false;
+          this.restCooldown = rand(100, 300);
+        }
+      }
+      if (this.restTimer > this.restDuration) {
+        this.resting = false;
+        this.restCooldown = rand(100, 300);
+        this.restDuration = rand(150, 500);
+      }
+      return;
+    }
+
+    const s = this.speed * speedMul;
+    this.wanderPhase += 0.015 * speedMul;
+    this.x += (this.baseSpeedX + Math.sin(this.wanderPhase * this.wanderFreq) * 1.2 + windX * 0.3) * s;
+    this.y += (this.baseSpeedY + Math.cos(this.wanderPhase * this.wanderFreq * 0.7) * 0.8 + windY * 0.2) * s;
+    this.wingPhase += this.wingSpeed * Math.max(0.5, speedMul);
+    const margin = this.size * 4;
+    if (this.x < -margin || this.x > this.screenW + margin ||
+        this.y < -margin || this.y > this.screenH + margin) {
+      this.reset(false);
+    }
+  }
+
+  drawForewing(ctx, s, flapScale, mirror) {
+    // forewing: triangular, extends UP and OUT from body
+    const fw = s * 1.4;  // forewing span outward
+    const fh = s * 1.6;  // forewing height upward
+    ctx.save();
+    if (mirror) ctx.scale(-1, 1);
+    ctx.scale(flapScale, 1); // foreshorten with flap
+
+    function fwPath() {
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      // leading edge — sweeps up and out
+      ctx.bezierCurveTo(fw * 0.15, -fh * 0.6, fw * 0.5, -fh * 0.95, fw * 0.75, -fh * 0.8);
+      // outer tip curves down
+      ctx.bezierCurveTo(fw * 0.95, -fh * 0.6, fw * 1.0, -fh * 0.3, fw * 0.85, -fh * 0.05);
+      // trailing edge back to body
+      ctx.bezierCurveTo(fw * 0.6, fh * 0.05, fw * 0.25, fh * 0.02, 0, 0);
+      ctx.closePath();
+    }
+
+    fwPath();
+    const grad = ctx.createLinearGradient(0, 0, fw * 0.5, -fh * 0.8);
+    grad.addColorStop(0, `hsla(${this.hue1}, ${this.sat}%, ${this.lit}%, 0.9)`);
+    grad.addColorStop(0.5, `hsla(${this.hue1}, ${this.sat}%, ${this.lit + 8}%, 0.85)`);
+    grad.addColorStop(1, `hsla(${this.hue1}, ${this.sat - 10}%, ${this.lit - 5}%, 0.8)`);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${this.hue1}, ${this.sat}%, ${this.lit - 25}%, 0.5)`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    // wing veins — clipped like air fryer wings
+    ctx.save();
+    fwPath();
+    ctx.clip();
+    ctx.strokeStyle = `hsla(${this.hue1}, ${this.sat - 20}%, ${this.lit - 15}%, 0.25)`;
+    ctx.lineWidth = 0.6;
+    for (let i = 0; i < 6; i++) {
+      const t = (i + 1) / 7;
+      const vx = fw * (0.3 + t * 0.55);
+      const vy = -fh * (0.2 + t * 0.6);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(vx * 0.4, vy * 0.5, vx, vy);
+      ctx.stroke();
+    }
+
+    // eye spot on forewing
+    if (this.hasEyeSpots) {
+      ctx.fillStyle = `hsla(${this.hue1 + 180}, 30%, 90%, 0.5)`;
+      ctx.beginPath();
+      ctx.arc(fw * 0.55, -fh * 0.55, s * 0.13, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = `hsla(${this.hue1 + 180}, 50%, 15%, 0.6)`;
+      ctx.beginPath();
+      ctx.arc(fw * 0.55, -fh * 0.55, s * 0.06, 0, TAU);
+      ctx.fill();
+    }
+
+    // highlight sheen
+    const sheen = ctx.createRadialGradient(fw * 0.3, -fh * 0.5, 0, fw * 0.3, -fh * 0.5, fw * 0.5);
+    sheen.addColorStop(0, 'rgba(255,255,255,0.15)');
+    sheen.addColorStop(1, 'rgba(255,255,255,0)');
+    fwPath();
+    ctx.fillStyle = sheen;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  drawHindwing(ctx, s, flapScale, mirror) {
+    // hindwing: rounder, extends OUT and slightly DOWN
+    const hw = s * 1.1;
+    const hh = s * 1.0;
+    ctx.save();
+    if (mirror) ctx.scale(-1, 1);
+    ctx.scale(flapScale, 1);
+
+    function hwPath() {
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      // sweeps outward and down in a rounded fan
+      ctx.bezierCurveTo(hw * 0.4, -hh * 0.1, hw * 0.9, -hh * 0.15, hw * 0.85, hh * 0.2);
+      // bottom round curve
+      ctx.bezierCurveTo(hw * 0.8, hh * 0.55, hw * 0.5, hh * 0.75, hw * 0.15, hh * 0.6);
+      // back to body
+      ctx.bezierCurveTo(hw * 0.05, hh * 0.35, 0, hh * 0.15, 0, 0);
+      ctx.closePath();
+    }
+
+    hwPath();
+    ctx.fillStyle = `hsla(${this.hue2}, ${this.sat}%, ${this.lit + 5}%, 0.82)`;
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${this.hue2}, ${this.sat}%, ${this.lit - 20}%, 0.45)`;
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+
+    // hindwing veins
+    ctx.save();
+    hwPath();
+    ctx.clip();
+    ctx.strokeStyle = `hsla(${this.hue2}, ${this.sat - 20}%, ${this.lit - 10}%, 0.2)`;
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i < 4; i++) {
+      const t = (i + 1) / 5;
+      const vx = hw * (0.2 + t * 0.5);
+      const vy = hh * (0.1 + t * 0.4);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(vx * 0.6, vy * 0.3, vx, vy);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  draw(ctx) {
+    const s = this.size;
+    // flap simulated as x-axis foreshortening (1 = flat open, 0.1 = edge-on)
+    const flapScale = 0.35 + 0.65 * Math.abs(Math.cos(this.wingPhase));
+    const bodyTilt = Math.sin(this.wanderPhase * 0.5) * 0.12;
+    // slight bob up/down with flap
+    const bob = Math.sin(this.wingPhase * 2) * s * 0.04;
+
+    ctx.save();
+    ctx.translate(this.x, this.y + bob);
+    ctx.rotate(bodyTilt);
+
+    // hindwings behind body
+    ctx.save();
+    ctx.translate(0, s * 0.05);
+    this.drawHindwing(ctx, s, flapScale, false);
+    this.drawHindwing(ctx, s, flapScale, true);
+    ctx.restore();
+
+    // forewings in front
+    ctx.save();
+    ctx.translate(0, -s * 0.1);
+    this.drawForewing(ctx, s, flapScale, false);
+    this.drawForewing(ctx, s, flapScale, true);
+    ctx.restore();
+
+    // body — thin elongated thorax + abdomen
+    const bodyGrad = ctx.createLinearGradient(0, -s * 0.5, 0, s * 0.5);
+    bodyGrad.addColorStop(0, '#1a0e04');
+    bodyGrad.addColorStop(0.5, '#2e1a08');
+    bodyGrad.addColorStop(1, '#1a0e04');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.06, s * 0.45, 0, 0, TAU);
+    ctx.fill();
+
+    // thorax bump
+    ctx.fillStyle = '#2a1808';
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 0.15, s * 0.07, s * 0.1, 0, 0, TAU);
+    ctx.fill();
+
+    // head
+    ctx.fillStyle = '#1a0e04';
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.5, s * 0.08, 0, TAU);
+    ctx.fill();
+
+    // eyes
+    ctx.fillStyle = '#3a2a10';
+    ctx.beginPath();
+    ctx.arc(-s * 0.05, -s * 0.52, s * 0.03, 0, TAU);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(s * 0.05, -s * 0.52, s * 0.03, 0, TAU);
+    ctx.fill();
+
+    // antennae — curving outward with clubbed tips
+    ctx.strokeStyle = '#1a0e04';
+    ctx.lineWidth = 0.7;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.02, -s * 0.56);
+    ctx.bezierCurveTo(-s * 0.1, -s * 0.75, -s * 0.22, -s * 0.9, -s * 0.28, -s * 0.95);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(s * 0.02, -s * 0.56);
+    ctx.bezierCurveTo(s * 0.1, -s * 0.75, s * 0.22, -s * 0.9, s * 0.28, -s * 0.95);
+    ctx.stroke();
+    // clubbed tips
+    ctx.fillStyle = '#1a0e04';
+    ctx.beginPath(); ctx.arc(-s * 0.28, -s * 0.95, s * 0.025, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(s * 0.28, -s * 0.95, s * 0.025, 0, TAU); ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+/* ── Bird (reuses air fryer flapping wing mechanics) ─── */
+class Bird {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(20, 40);
+    this.speed = rand(1.5, 3.5);
+    this.wingPhase = rand(0, TAU);
+    this.wingSpeed = rand(0.06, 0.1);
+    this.wanderPhase = rand(0, TAU);
+    // bird species palette
+    const palette = pick([
+      { body: '#3a3632', breast: '#c85a3a', wing: '#4a4540' },  // robin
+      { body: '#2848a8', breast: '#e8e0d0', wing: '#3058b8' },  // bluebird
+      { body: '#e8c820', breast: '#e8c820', wing: '#5a7a20' },   // goldfinch
+      { body: '#4a4a4a', breast: '#d8d0c8', wing: '#555550' },   // sparrow
+      { body: '#c83030', breast: '#c83030', wing: '#8a2020' },    // cardinal
+    ]);
+    this.bodyColor = palette.body;
+    this.breastColor = palette.breast;
+    this.wingColor = palette.wing;
+    this.glideTimer = 0;
+    this.isGliding = false;
+    // perching state
+    this.state = 'flying'; // flying, landing, perched, takeoff
+    this.perchTarget = null; // {x, y}
+    this.perchTree = null;
+    this.perchIdx = -1;
+    this.perchTimer = 0;
+    this.perchDuration = rand(200, 600);
+    this.landTimer = 0;
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(this.screenH * 0.05, this.screenH * 0.45);
+    } else {
+      this.x = rand(0, 1) < 0.5 ? -this.size * 4 : this.screenW + this.size * 4;
+      this.y = rand(this.screenH * 0.05, this.screenH * 0.4);
+      this.speed = Math.abs(this.speed) * (this.x < 0 ? 1 : -1);
+    }
+  }
+  tryPerch(treesArr) {
+    if (this.state !== 'flying' || Math.random() > 0.003) return;
+    // find a tree with an unoccupied perch
+    for (const tree of treesArr) {
+      for (let i = 0; i < tree.perchPoints.length; i++) {
+        if (!tree.perchPoints[i].occupied) {
+          const p = tree.getPerchWorld(i);
+          const dx = p.x - this.x;
+          const dy = p.y - this.y;
+          if (Math.abs(dx) < 300 && Math.abs(dy) < 300) {
+            this.state = 'landing';
+            this.perchTarget = p;
+            this.perchTree = tree;
+            this.perchIdx = i;
+            tree.perchPoints[i].occupied = true;
+            return;
+          }
+        }
+      }
+    }
+  }
+  update(speedMul) {
+    if (this.state === 'perched') {
+      this.perchTimer += speedMul;
+      this.wingPhase = 0; // wings folded
+      if (this.perchTimer > this.perchDuration) {
+        this.state = 'takeoff';
+        this.perchTimer = 0;
+        if (this.perchTree && this.perchIdx >= 0) {
+          this.perchTree.perchPoints[this.perchIdx].occupied = false;
+        }
+        this.perchTree = null;
+        this.perchIdx = -1;
+        this.speed = (Math.random() < 0.5 ? 1 : -1) * rand(1.5, 3.5);
+      }
+      return;
+    }
+
+    if (this.state === 'landing' && this.perchTarget) {
+      // fly toward perch point
+      const dx = this.perchTarget.x - this.x;
+      const dy = this.perchTarget.y - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 5) {
+        this.state = 'perched';
+        this.x = this.perchTarget.x;
+        this.y = this.perchTarget.y;
+        this.perchTimer = 0;
+        return;
+      }
+      const approach = Math.min(2.5, dist * 0.04) * speedMul;
+      this.x += (dx / dist) * approach;
+      this.y += (dy / dist) * approach;
+      this.speed = dx > 0 ? Math.abs(this.speed) : -Math.abs(this.speed);
+      this.wingPhase += this.wingSpeed * 0.7 * speedMul;
+      return;
+    }
+
+    if (this.state === 'takeoff') {
+      this.landTimer += speedMul;
+      this.y -= 1.5 * speedMul;
+      this.wingPhase += this.wingSpeed * 1.5 * speedMul;
+      if (this.landTimer > 40) {
+        this.state = 'flying';
+        this.landTimer = 0;
+      }
+    }
+
+    const s = Math.abs(this.speed) * speedMul;
+    this.wanderPhase += 0.01 * speedMul;
+    const dir = this.speed > 0 ? 1 : -1;
+    this.x += (dir * 2.0 + windX * 0.15) * s;
+    this.y += (Math.sin(this.wanderPhase * 0.8) * 0.5 + windY * 0.1) * s;
+
+    // occasional glide
+    this.glideTimer += speedMul;
+    if (!this.isGliding && this.glideTimer > rand(80, 200)) {
+      this.isGliding = true;
+      this.glideTimer = 0;
+    }
+    if (this.isGliding && this.glideTimer > rand(30, 60)) {
+      this.isGliding = false;
+      this.glideTimer = 0;
+    }
+
+    if (!this.isGliding) {
+      this.wingPhase += this.wingSpeed * Math.max(0.5, speedMul);
+    }
+
+    const margin = this.size * 5;
+    if (this.x < -margin || this.x > this.screenW + margin ||
+        this.y < -margin || this.y > this.screenH + margin) {
+      if (this.perchTree && this.perchIdx >= 0) {
+        this.perchTree.perchPoints[this.perchIdx].occupied = false;
+      }
+      this.reset(false);
+    }
+  }
+
+  drawWing(ctx, s, flapAngle, mirror) {
+    // reuses the air fryer bezier wing path approach
+    const wingLen = s * 1.4;
+    const wingW = s * 0.5;
+
+    ctx.save();
+    if (mirror) ctx.scale(-1, 1);
+    ctx.rotate(flapAngle);
+
+    const grad = ctx.createLinearGradient(0, 0, -wingLen, -wingW * 0.3);
+    grad.addColorStop(0, this.wingColor);
+    grad.addColorStop(0.6, this.bodyColor);
+    grad.addColorStop(1, '#2a2520');
+
+    function wingPath() {
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      // leading edge sweeps up and out
+      ctx.bezierCurveTo(
+        -wingLen * 0.2, -wingW * 0.7,
+        -wingLen * 0.5, -wingW * 1.0,
+        -wingLen, -wingW * 0.4
+      );
+      // wingtip curves back
+      ctx.bezierCurveTo(
+        -wingLen * 0.95, -wingW * 0.1,
+        -wingLen * 0.8, wingW * 0.05,
+        -wingLen * 0.65, wingW * 0.1
+      );
+      // trailing edge back to body
+      ctx.bezierCurveTo(
+        -wingLen * 0.4, wingW * 0.15,
+        -wingLen * 0.15, wingW * 0.08,
+        0, 0
+      );
+      ctx.closePath();
+    }
+
+    wingPath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+
+    // feather lines — clipped, exactly like air fryer wing veins
+    ctx.save();
+    wingPath();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i < 7; i++) {
+      const t = (i + 1) / 8;
+      const angle = -0.7 - t * 1.0;
+      const len = wingLen * (0.4 + t * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.02 * t, s * 0.01 * t);
+      ctx.lineTo(Math.cos(angle) * len, Math.sin(angle) * len);
+      ctx.stroke();
+    }
+    // wing highlight
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = s * 0.02;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.01);
+    ctx.bezierCurveTo(
+      -wingLen * 0.2, -wingW * 0.6,
+      -wingLen * 0.5, -wingW * 0.9,
+      -wingLen * 0.9, -wingW * 0.4
+    );
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  draw(ctx) {
+    const s = this.size;
+    const dir = this.speed > 0 ? 1 : -1;
+    const perched = this.state === 'perched';
+    const flapAngle = perched ? -0.6 : (this.isGliding ? -0.15 : Math.sin(this.wingPhase) * 0.45);
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.scale(dir, 1);
+
+    // wings behind body (smaller when perched/folded)
+    ctx.save();
+    ctx.translate(-s * 0.1, -s * 0.15);
+    this.drawWing(ctx, s, -0.2 + flapAngle, false);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(s * 0.1, -s * 0.15);
+    this.drawWing(ctx, s, -0.2 + flapAngle, true);
+    ctx.restore();
+
+    // body
+    const bodyGrad = ctx.createRadialGradient(-s * 0.05, -s * 0.05, 0, 0, 0, s * 0.4);
+    bodyGrad.addColorStop(0, this.breastColor);
+    bodyGrad.addColorStop(1, this.bodyColor);
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.2, s * 0.3, 0, 0, TAU);
+    ctx.fill();
+
+    // head
+    ctx.fillStyle = this.bodyColor;
+    ctx.beginPath();
+    ctx.arc(s * 0.15, -s * 0.28, s * 0.14, 0, TAU);
+    ctx.fill();
+
+    // eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s * 0.22, -s * 0.3, s * 0.04, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(s * 0.23, -s * 0.3, s * 0.025, 0, TAU);
+    ctx.fill();
+
+    // beak
+    ctx.fillStyle = '#d4a030';
+    ctx.beginPath();
+    ctx.moveTo(s * 0.28, -s * 0.28);
+    ctx.lineTo(s * 0.45, -s * 0.25);
+    ctx.lineTo(s * 0.28, -s * 0.22);
+    ctx.closePath();
+    ctx.fill();
+
+    // tail
+    ctx.fillStyle = this.wingColor;
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.15, s * 0.15);
+    ctx.bezierCurveTo(-s * 0.3, s * 0.3, -s * 0.5, s * 0.35, -s * 0.55, s * 0.25);
+    ctx.bezierCurveTo(-s * 0.45, s * 0.2, -s * 0.3, s * 0.1, -s * 0.15, s * 0.05);
+    ctx.closePath();
+    ctx.fill();
+
+    // tail feather lines
+    ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+    ctx.lineWidth = 0.4;
+    for (let i = 0; i < 3; i++) {
+      const t = (i + 1) / 4;
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.15, s * 0.1);
+      ctx.lineTo(-s * (0.3 + t * 0.2), s * (0.2 + t * 0.08));
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+}
+
+/* ── Bee ─────────────────────────────────────────────── */
+class Bee {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(10, 18);
+    this.speed = rand(1.5, 3.0);
+    this.wingPhase = rand(0, TAU);
+    this.wingSpeed = rand(0.25, 0.4); // bees flap fast
+    this.wanderPhase = rand(0, TAU);
+    this.buzzOffset = rand(0, TAU);
+    this.resting = false;
+    this.restTimer = 0;
+    this.restDuration = rand(80, 250);
+    this.restFlower = null;
+    this.restCooldown = 0;
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(this.screenH * 0.45, this.screenH * 0.82);
+    } else {
+      this.x = rand(0, 1) < 0.5 ? -this.size * 3 : this.screenW + this.size * 3;
+      this.y = rand(this.screenH * 0.45, this.screenH * 0.82);
+    }
+  }
+  tryRest(flowersArr) {
+    if (this.resting || this.restCooldown > 0 || Math.random() > 0.006) return;
+    for (const f of flowersArr) {
+      if (f.bloomPhase < 0.7 || f.dead || f.fadeAlpha < 0.5) continue;
+      const tipX = f.x + f.stemCurve * 0.3;
+      const tipY = f.groundY - f.stemH;
+      const dx = tipX - this.x, dy = tipY - this.y;
+      if (dx * dx + dy * dy < 120 * 120) {
+        this.resting = true;
+        this.restTimer = 0;
+        this.restFlower = f;
+        this.x = tipX + rand(-f.petalSize * 0.3, f.petalSize * 0.3);
+        this.y = tipY - f.petalSize * 0.2;
+        return;
+      }
+    }
+  }
+  update(speedMul, time) {
+    this.restCooldown = Math.max(0, this.restCooldown - speedMul);
+
+    if (this.resting) {
+      this.restTimer += speedMul;
+      this.wingPhase += this.wingSpeed * 0.15 * speedMul; // slow buzz
+      if (this.restFlower) {
+        const sway = Math.sin((time || 0) * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
+        this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3 + rand(-0.3, 0.3);
+        this.y = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.2;
+        if (this.restFlower.dead || this.restFlower.fadeAlpha < 0.3) {
+          this.resting = false;
+          this.restCooldown = rand(60, 150);
+        }
+      }
+      if (this.restTimer > this.restDuration) {
+        this.resting = false;
+        this.restCooldown = rand(60, 150);
+        this.restDuration = rand(80, 250);
+      }
+      return;
+    }
+
+    const s = this.speed * speedMul;
+    this.wanderPhase += 0.02 * speedMul;
+    this.x += (Math.sin(this.wanderPhase * 1.3) * 2.0 + windX * 0.2) * s;
+    this.y += (Math.sin(this.wanderPhase * 1.7 + this.buzzOffset) * 1.5 + Math.sin(this.wanderPhase * 3.1) * 0.5) * s * 0.5;
+    this.y = Math.max(this.screenH * 0.35, Math.min(this.screenH * 0.9, this.y));
+    this.wingPhase += this.wingSpeed * speedMul;
+    const margin = this.size * 5;
+    if (this.x < -margin || this.x > this.screenW + margin) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    const flapAngle = Math.sin(this.wingPhase) * 0.5;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // wings (translucent)
+    ctx.save();
+    ctx.rotate(-0.3 + flapAngle);
+    ctx.fillStyle = 'rgba(200, 220, 255, 0.45)';
+    ctx.strokeStyle = 'rgba(150, 180, 220, 0.4)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.5, -s * 0.3, s * 0.7, s * 0.3, -0.3, 0, TAU);
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.rotate(-0.3 + flapAngle);
+    ctx.fillStyle = 'rgba(200, 220, 255, 0.45)';
+    ctx.strokeStyle = 'rgba(150, 180, 220, 0.4)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.5, -s * 0.3, s * 0.7, s * 0.3, -0.3, 0, TAU);
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+
+    // body - alternating stripes
+    ctx.fillStyle = '#1a1000';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.35, s * 0.55, 0, 0, TAU);
+    ctx.fill();
+    // yellow stripes
+    ctx.fillStyle = '#f5c800';
+    for (let i = 0; i < 3; i++) {
+      const sy = -s * 0.3 + i * s * 0.22;
+      ctx.beginPath();
+      const sw = s * 0.33 * (1 - Math.abs(sy) / (s * 0.55));
+      ctx.ellipse(0, sy, Math.max(2, sw), s * 0.08, 0, 0, TAU);
+      ctx.fill();
+    }
+
+    // head
+    ctx.fillStyle = '#1a1000';
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.55, s * 0.18, 0, TAU);
+    ctx.fill();
+
+    // eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(-s * 0.08, -s * 0.58, s * 0.05, 0, TAU);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(s * 0.08, -s * 0.58, s * 0.05, 0, TAU);
+    ctx.fill();
+
+    // stinger
+    ctx.fillStyle = '#1a1000';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.04, s * 0.55);
+    ctx.lineTo(0, s * 0.72);
+    ctx.lineTo(s * 0.04, s * 0.55);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+/* ── Ladybug ─────────────────────────────────────────── */
+class Ladybug {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(8, 15);
+    this.speed = rand(0.4, 1.2);
+    this.wanderPhase = rand(0, TAU);
+    this.spotCount = Math.floor(rand(3, 8));
+    this.spots = [];
+    for (let i = 0; i < this.spotCount; i++) {
+      this.spots.push({
+        x: rand(-0.35, 0.35),
+        y: rand(-0.35, 0.4),
+        r: rand(0.06, 0.12)
+      });
+    }
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(this.screenH * 0.7, this.screenH * 0.92);
+    } else {
+      this.x = rand(0, 1) < 0.5 ? -this.size * 3 : this.screenW + this.size * 3;
+      this.y = rand(this.screenH * 0.7, this.screenH * 0.92);
+    }
+    this.wingPhase = rand(0, TAU);
+    this.wingSpeed = rand(0.12, 0.2);
+    this.resting = false;
+    this.restTimer = 0;
+    this.restDuration = rand(200, 600);
+    this.restFlower = null;
+    this.restCooldown = 0;
+  }
+  tryRest(flowersArr) {
+    if (this.resting || this.restCooldown > 0 || Math.random() > 0.003) return;
+    for (const f of flowersArr) {
+      if (f.bloomPhase < 0.7 || f.dead || f.fadeAlpha < 0.5) continue;
+      const tipX = f.x + f.stemCurve * 0.3;
+      const tipY = f.groundY - f.stemH;
+      const dx = tipX - this.x, dy = tipY - this.y;
+      if (dx * dx + dy * dy < 100 * 100) {
+        this.resting = true;
+        this.restTimer = 0;
+        this.restFlower = f;
+        this.x = tipX + rand(-f.petalSize * 0.4, f.petalSize * 0.4);
+        this.y = tipY;
+        return;
+      }
+    }
+  }
+  update(speedMul, time) {
+    this.restCooldown = Math.max(0, this.restCooldown - speedMul);
+
+    if (this.resting) {
+      this.restTimer += speedMul;
+      if (this.restFlower) {
+        const sway = Math.sin((time || 0) * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
+        this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3 + rand(-0.2, 0.2);
+        this.y = this.restFlower.groundY - this.restFlower.stemH;
+        if (this.restFlower.dead || this.restFlower.fadeAlpha < 0.3) {
+          this.resting = false;
+          this.restCooldown = rand(100, 300);
+        }
+      }
+      if (this.restTimer > this.restDuration) {
+        this.resting = false;
+        this.restCooldown = rand(100, 300);
+        this.restDuration = rand(200, 600);
+      }
+      return;
+    }
+
+    const s = this.speed * speedMul;
+    this.wanderPhase += 0.012 * speedMul;
+    this.x += (Math.sin(this.wanderPhase * 0.8) * 0.8 + windX * 0.15) * s;
+    this.y += (Math.cos(this.wanderPhase * 0.6) * 0.3 + windY * 0.05) * s;
+    this.y = Math.max(this.screenH * 0.6, Math.min(this.screenH * 0.95, this.y));
+    this.wingPhase += this.wingSpeed * speedMul;
+    const margin = this.size * 5;
+    if (this.x < -margin || this.x > this.screenW + margin) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    const flapAngle = Math.sin(this.wingPhase) * 0.15;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // tiny wings peeking out
+    ctx.fillStyle = 'rgba(180, 160, 140, 0.4)';
+    ctx.save();
+    ctx.rotate(-0.2 + flapAngle);
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.4, -s * 0.1, s * 0.5, s * 0.2, -0.2, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.rotate(-0.2 + flapAngle);
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.4, -s * 0.1, s * 0.5, s * 0.2, -0.2, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    // shell
+    ctx.fillStyle = '#cc2200';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.45, s * 0.5, 0, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = '#880000';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    // center line
+    ctx.strokeStyle = '#1a0800';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.5);
+    ctx.lineTo(0, s * 0.5);
+    ctx.stroke();
+
+    // spots
+    ctx.fillStyle = '#1a0800';
+    for (const sp of this.spots) {
+      ctx.beginPath();
+      ctx.arc(sp.x * s, sp.y * s, sp.r * s, 0, TAU);
+      ctx.fill();
+    }
+
+    // head
+    ctx.fillStyle = '#1a0800';
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.52, s * 0.2, 0, TAU);
+    ctx.fill();
+
+    // antennae
+    ctx.strokeStyle = '#1a0800';
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.05, -s * 0.65);
+    ctx.lineTo(-s * 0.2, -s * 0.85);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(s * 0.05, -s * 0.65);
+    ctx.lineTo(s * 0.2, -s * 0.85);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+/* ── Dragonfly ───────────────────────────────────────── */
+class Dragonfly {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(18, 30);
+    this.speed = rand(2.0, 4.0);
+    this.wingPhase = rand(0, TAU);
+    this.wingSpeed = rand(0.2, 0.35);
+    this.bodyHue = pick([180, 200, 220, 140, 280]);
+    this.wanderPhase = rand(0, TAU);
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(this.screenH * 0.05, this.screenH * 0.5);
+    } else {
+      this.x = rand(0, 1) < 0.5 ? -this.size * 4 : this.screenW + this.size * 4;
+      this.y = rand(this.screenH * 0.05, this.screenH * 0.5);
+    }
+  }
+  update(speedMul) {
+    const s = this.speed * speedMul;
+    this.wanderPhase += 0.018 * speedMul;
+    this.x += (Math.sin(this.wanderPhase * 0.5) * 2.5 + windX * 0.25) * s;
+    this.y += Math.sin(this.wanderPhase * 1.2) * 0.8 * s;
+    this.wingPhase += this.wingSpeed * speedMul;
+    const margin = this.size * 5;
+    if (this.x < -margin || this.x > this.screenW + margin ||
+        this.y < -margin || this.y > this.screenH + margin) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    const flapAngle = Math.sin(this.wingPhase) * 0.35;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // 4 wings (2 pairs)
+    for (let pair = 0; pair < 2; pair++) {
+      const pairOffset = pair * s * 0.2;
+      const pairFlap = flapAngle * (pair === 0 ? 1 : 0.8);
+      for (let side = -1; side <= 1; side += 2) {
+        ctx.save();
+        ctx.translate(0, -s * 0.1 + pairOffset);
+        ctx.scale(side, 1);
+        ctx.rotate(-0.15 + pairFlap);
+        ctx.fillStyle = `rgba(180, 210, 240, ${0.3 + pair * 0.05})`;
+        ctx.strokeStyle = 'rgba(100, 140, 180, 0.35)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.ellipse(-s * 0.8, 0, s * 0.9, s * 0.18, -0.1, 0, TAU);
+        ctx.fill(); ctx.stroke();
+        // wing veins
+        ctx.strokeStyle = 'rgba(100, 140, 180, 0.2)';
+        ctx.lineWidth = 0.4;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(-s * 1.5, 0);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // body (long thin abdomen)
+    ctx.fillStyle = `hsl(${this.bodyHue}, 70%, 40%)`;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.08, s * 0.55, 0, 0, TAU);
+    ctx.fill();
+
+    // tail (long extension)
+    ctx.strokeStyle = `hsl(${this.bodyHue}, 70%, 35%)`;
+    ctx.lineWidth = s * 0.07;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, s * 0.5);
+    ctx.lineTo(0, s * 1.4);
+    ctx.stroke();
+
+    // head
+    ctx.fillStyle = `hsl(${this.bodyHue}, 60%, 30%)`;
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.55, s * 0.12, 0, TAU);
+    ctx.fill();
+
+    // big compound eyes
+    ctx.fillStyle = `hsl(${this.bodyHue}, 80%, 50%)`;
+    ctx.beginPath();
+    ctx.arc(-s * 0.1, -s * 0.58, s * 0.07, 0, TAU);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(s * 0.1, -s * 0.58, s * 0.07, 0, TAU);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+/* ── Petal (wind-blown) ──────────────────────────────── */
+class Petal {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(4, 10);
+    this.speed = rand(0.5, 1.5);
+    this.spin = rand(0, TAU);
+    this.spinSpeed = rand(0.02, 0.06) * (Math.random() < 0.5 ? 1 : -1);
+    this.hue = pick([340, 350, 0, 320, 30, 45]);
+    this.sat = rand(60, 90);
+    this.lit = rand(70, 90);
+    this.alpha = rand(0.5, 0.85);
+    this.tumble = rand(0, TAU);
+    this.tumbleSpeed = rand(0.01, 0.04);
+    if (initial) {
+      this.x = rand(-50, this.screenW + 50);
+      this.y = rand(-50, this.screenH + 50);
+    } else {
+      this.x = -this.size * 2;
+      this.y = rand(-50, this.screenH * 0.6);
+    }
+  }
+  update(speedMul) {
+    const s = this.speed * speedMul;
+    this.x += (windX * 1.5 + Math.sin(this.tumble) * 0.3) * s;
+    this.y += (0.3 + windY * 0.5 + Math.cos(this.tumble * 0.7) * 0.2) * s;
+    this.spin += this.spinSpeed * speedMul;
+    this.tumble += this.tumbleSpeed * speedMul;
+    if (this.x > this.screenW + 30 || this.y > this.screenH + 30 || this.x < -60) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    const scaleY = 0.5 + 0.5 * Math.abs(Math.cos(this.spin));
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.spin * 0.5);
+    ctx.scale(1, scaleY);
+    ctx.fillStyle = `hsla(${this.hue}, ${this.sat}%, ${this.lit}%, ${this.alpha})`;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s, s * 0.5, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+/* ── Dandelion Seed (floating puffball) ──────────────── */
+class DandelionSeed {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(3, 6);
+    this.speed = rand(0.3, 0.8);
+    this.driftPhase = rand(0, TAU);
+    this.parasols = Math.floor(rand(6, 12));
+    this.alpha = rand(0.4, 0.7);
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(0, this.screenH);
+    } else {
+      this.x = rand(-30, this.screenW * 0.3);
+      this.y = rand(this.screenH * 0.3, this.screenH);
+    }
+  }
+  update(speedMul) {
+    const s = this.speed * speedMul;
+    this.driftPhase += 0.008 * speedMul;
+    this.x += (windX * 0.8 + Math.sin(this.driftPhase * 2) * 0.2) * s;
+    this.y += (-0.5 + windY * 0.3 + Math.sin(this.driftPhase * 1.3) * 0.15) * s;
+    if (this.x > this.screenW + 30 || this.y < -30) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.globalAlpha = this.alpha;
+    // seed
+    ctx.fillStyle = '#8a7a60';
+    ctx.beginPath();
+    ctx.ellipse(0, s * 0.3, s * 0.12, s * 0.25, 0, 0, TAU);
+    ctx.fill();
+    // parasol filaments
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 0.4;
+    for (let i = 0; i < this.parasols; i++) {
+      const a = (i / this.parasols) * TAU;
+      const len = s * rand(0.7, 1.2);
+      const tipX = Math.cos(a) * len;
+      const tipY = -Math.abs(Math.sin(a)) * len - s * 0.1;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(tipX, tipY);
+      ctx.stroke();
+      // tiny tuft at tip
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath();
+      ctx.arc(tipX, tipY, 0.6, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+}
+
+/* ── Particle (pollen / dust motes) ──────────────────── */
+class Particle {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(1, 3.5);
+    this.speed = rand(0.2, 0.6);
+    this.alpha = rand(0.15, 0.45);
+    this.hue = pick([55, 60, 45, 40, 90]); // golden pollen tones
+    this.driftPhase = rand(0, TAU);
+    this.twinklePhase = rand(0, TAU);
+    if (initial) {
+      this.x = rand(0, this.screenW);
+      this.y = rand(0, this.screenH);
+    } else {
+      this.x = rand(-20, 0);
+      this.y = rand(0, this.screenH);
+    }
+  }
+  update(speedMul) {
+    const s = this.speed * speedMul;
+    this.driftPhase += 0.01 * speedMul;
+    this.twinklePhase += 0.03 * speedMul;
+    this.x += (windX * 0.5 + Math.sin(this.driftPhase) * 0.2) * s;
+    this.y += (Math.cos(this.driftPhase * 0.7) * 0.15 + windY * 0.2) * s;
+    if (this.x > this.screenW + 10 || this.x < -10 || this.y < -10 || this.y > this.screenH + 10) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const twinkle = 0.7 + 0.3 * Math.sin(this.twinklePhase);
+    ctx.fillStyle = `hsla(${this.hue}, 80%, 80%, ${this.alpha * twinkle})`;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, TAU);
+    ctx.fill();
+  }
+}
+
+/* ── Sunlight Ray (subtle god-rays) ──────────────────── */
+class SunRay {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.angle = rand(-0.4, 0.4);
+    this.width = rand(40, 120);
+    this.alpha = rand(0.02, 0.06);
+    this.drift = rand(0, TAU);
+  }
+  draw(ctx, time) {
+    const a = this.alpha * (0.7 + 0.3 * Math.sin(time * 0.3 + this.drift));
+    ctx.save();
+    ctx.translate(this.screenW * 0.8, 0);
+    ctx.rotate(this.angle + Math.sin(time * 0.1 + this.drift) * 0.02);
+    const grad = ctx.createLinearGradient(0, 0, 0, this.screenH * 1.2);
+    grad.addColorStop(0, `rgba(255, 250, 200, ${a})`);
+    grad.addColorStop(0.5, `rgba(255, 245, 180, ${a * 0.5})`);
+    grad.addColorStop(1, `rgba(255, 240, 160, 0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(-this.width / 2, 0, this.width, this.screenH * 1.2);
+    ctx.restore();
+  }
+}
+
+/* ── Cloud ───────────────────────────────────────────── */
+class Cloud {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(80, 200);
+    this.speed = rand(0.1, 0.4);
+    this.y = rand(20, this.screenH * 0.25);
+    this.alpha = rand(0.3, 0.6);
+    this.blobCount = Math.floor(rand(3, 7));
+    this.blobs = [];
+    for (let i = 0; i < this.blobCount; i++) {
+      this.blobs.push({
+        ox: rand(-0.4, 0.4) * this.size,
+        oy: rand(-0.15, 0.15) * this.size,
+        r: rand(0.2, 0.45) * this.size,
+      });
+    }
+    if (initial) {
+      this.x = rand(-this.size, this.screenW + this.size);
+    } else {
+      this.x = -this.size * 1.5;
+    }
+  }
+  update(speedMul) {
+    this.x += (this.speed + windX * 0.08) * speedMul;
+    if (this.x > this.screenW + this.size * 2) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${this.alpha})`;
+    for (const b of this.blobs) {
+      ctx.beginPath();
+      ctx.arc(this.x + b.ox, this.y + b.oy, b.r, 0, TAU);
+      ctx.fill();
+    }
+  }
+}
+
+/* ── Sun ─────────────────────────────────────────────── */
+function drawSun(ctx, w, h, time) {
+  const sx = w * 0.85;
+  const sy = h * 0.08;
+  const r = 40;
+
+  // glow
+  const glow = ctx.createRadialGradient(sx, sy, r * 0.5, sx, sy, r * 4);
+  glow.addColorStop(0, 'rgba(255, 250, 200, 0.3)');
+  glow.addColorStop(0.3, 'rgba(255, 240, 150, 0.1)');
+  glow.addColorStop(1, 'rgba(255, 240, 150, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(sx - r * 4, sy - r * 4, r * 8, r * 8);
+
+  // rays
+  ctx.strokeStyle = 'rgba(255, 240, 160, 0.15)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * TAU + time * 0.05;
+    const inner = r * 1.3;
+    const outer = r * (1.8 + 0.3 * Math.sin(time * 0.5 + i));
+    ctx.beginPath();
+    ctx.moveTo(sx + Math.cos(a) * inner, sy + Math.sin(a) * inner);
+    ctx.lineTo(sx + Math.cos(a) * outer, sy + Math.sin(a) * outer);
+    ctx.stroke();
+  }
+
+  // disc
+  const disc = ctx.createRadialGradient(sx - r * 0.2, sy - r * 0.2, 0, sx, sy, r);
+  disc.addColorStop(0, '#fffde0');
+  disc.addColorStop(0.7, '#ffe94e');
+  disc.addColorStop(1, '#ffc800');
+  ctx.fillStyle = disc;
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, TAU);
+  ctx.fill();
+}
+
+/* ── Rolling Hills (background landscape) ────────────── */
+function drawBackHills(ctx, w, h) {
+  // far hills
+  ctx.fillStyle = '#6aad4a';
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  for (let x = 0; x <= w; x += 5) {
+    const y = h * 0.72 + Math.sin(x * 0.003 + 1) * 40 + Math.sin(x * 0.008) * 20;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(w, h);
+  ctx.fill();
+
+  // mid hills
+  ctx.fillStyle = '#5a9e38';
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  for (let x = 0; x <= w; x += 5) {
+    const y = h * 0.78 + Math.sin(x * 0.004 + 2.5) * 30 + Math.sin(x * 0.01 + 1) * 15;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(w, h);
+  ctx.fill();
+}
+
+function drawNearGround(ctx, w, h) {
+  ctx.fillStyle = '#4d8e2a';
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  for (let x = 0; x <= w; x += 5) {
+    const y = h * 0.85 + Math.sin(x * 0.005 + 4) * 20 + Math.sin(x * 0.015) * 8;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(w, h);
+  ctx.fill();
+}
+
+/* ── Tree ────────────────────────────────────────────── */
+class Tree {
+  constructor(x, groundY, w, h) {
+    this.x = x;
+    this.groundY = groundY;
+    this.screenW = w;
+    this.screenH = h;
+    this.trunkH = rand(140, 260);
+    this.trunkW = rand(18, 35);
+    this.canopyR = rand(80, 140);
+    // layered foliage clusters — dense and full
+    this.foliageLayers = [];
+    // back layer (darker, bigger, forms bulk)
+    const backCount = Math.floor(rand(7, 12));
+    for (let i = 0; i < backCount; i++) {
+      this.foliageLayers.push({
+        ox: rand(-0.75, 0.75) * this.canopyR,
+        oy: rand(-0.7, 0.4) * this.canopyR,
+        r: rand(0.35, 0.6) * this.canopyR,
+        hue: 90 + rand(-15, 10),
+        sat: 40 + rand(-5, 15),
+        lit: 22 + rand(-3, 5),
+        layer: 0,
+        leafPhase: rand(0, TAU),
+      });
+    }
+    // mid layer
+    const midCount = Math.floor(rand(8, 14));
+    for (let i = 0; i < midCount; i++) {
+      this.foliageLayers.push({
+        ox: rand(-0.7, 0.7) * this.canopyR,
+        oy: rand(-0.7, 0.3) * this.canopyR,
+        r: rand(0.28, 0.5) * this.canopyR,
+        hue: 85 + rand(-10, 20),
+        sat: 45 + rand(-5, 20),
+        lit: 30 + rand(-3, 8),
+        layer: 1,
+        leafPhase: rand(0, TAU),
+      });
+    }
+    // front layer (brighter, adds fullness and highlights)
+    const frontCount = Math.floor(rand(7, 11));
+    for (let i = 0; i < frontCount; i++) {
+      this.foliageLayers.push({
+        ox: rand(-0.65, 0.65) * this.canopyR,
+        oy: rand(-0.6, 0.25) * this.canopyR,
+        r: rand(0.2, 0.4) * this.canopyR,
+        hue: 80 + rand(-8, 25),
+        sat: 50 + rand(0, 25),
+        lit: 36 + rand(0, 15),
+        layer: 2,
+        leafPhase: rand(0, TAU),
+      });
+    }
+    // pre-compute bark line offsets
+    this.barkLines = [];
+    for (let i = 0; i < 5; i++) {
+      this.barkLines.push(rand(-5, 5));
+    }
+    this.swayOffset = rand(0, TAU);
+    // branch perch points for birds
+    this.perchPoints = [];
+    for (let i = 0; i < 3; i++) {
+      this.perchPoints.push({
+        ox: rand(-0.7, 0.7) * this.canopyR,
+        oy: rand(-0.3, 0.5) * this.canopyR - this.trunkH + this.canopyR * 0.3,
+        occupied: false,
+      });
+    }
+  }
+  getPerchWorld(idx) {
+    return {
+      x: this.x + this.perchPoints[idx].ox,
+      y: this.groundY + this.perchPoints[idx].oy,
+    };
+  }
+  draw(ctx, time) {
+    const sway = Math.sin(time * 0.4 + this.swayOffset) * 3;
+    const topX = this.x + sway;
+    const topY = this.groundY - this.trunkH;
+
+    // trunk
+    ctx.fillStyle = '#5a3a1a';
+    ctx.beginPath();
+    ctx.moveTo(this.x - this.trunkW * 0.5, this.groundY);
+    ctx.lineTo(this.x - this.trunkW * 0.6, this.groundY + 5);
+    ctx.lineTo(this.x + this.trunkW * 0.6, this.groundY + 5);
+    ctx.lineTo(this.x + this.trunkW * 0.5, this.groundY);
+    ctx.lineTo(topX + this.trunkW * 0.25, topY + this.canopyR * 0.3);
+    ctx.lineTo(topX - this.trunkW * 0.25, topY + this.canopyR * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // bark texture (pre-computed offsets)
+    ctx.strokeStyle = 'rgba(40,25,10,0.3)';
+    ctx.lineWidth = 0.8;
+    for (let i = 0; i < 5; i++) {
+      const by = this.groundY - this.trunkH * (i + 1) / 6;
+      const bx = this.x + sway * (1 - (i + 1) / 6) * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(bx - this.trunkW * 0.3, by);
+      ctx.quadraticCurveTo(bx, by + this.barkLines[i], bx + this.trunkW * 0.3, by);
+      ctx.stroke();
+    }
+
+    // branches
+    ctx.strokeStyle = '#4a2e12';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    const branchY = this.groundY - this.trunkH * 0.6;
+    ctx.beginPath();
+    ctx.moveTo(this.x + sway * 0.4, branchY);
+    ctx.quadraticCurveTo(this.x - this.canopyR * 0.5, branchY - 20, this.x - this.canopyR * 0.7 + sway, branchY - 10);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(this.x + sway * 0.4, branchY - this.trunkH * 0.1);
+    ctx.quadraticCurveTo(this.x + this.canopyR * 0.4, branchY - this.trunkH * 0.15 - 15, this.x + this.canopyR * 0.6 + sway, branchY - this.trunkH * 0.1 - 5);
+    ctx.stroke();
+
+    // foliage — layered clusters with depth
+    for (const f of this.foliageLayers) {
+      const leafSway = Math.sin(time * 0.8 + f.leafPhase) * 2;
+      const fx = topX + f.ox + leafSway;
+      const fy = topY + f.oy;
+
+      // shadow underneath each cluster
+      if (f.layer > 0) {
+        ctx.fillStyle = `hsla(${f.hue}, ${f.sat}%, ${f.lit - 8}%, 0.2)`;
+        ctx.beginPath();
+        ctx.ellipse(fx + 2, fy + 3, f.r * 0.9, f.r * 0.7, 0, 0, TAU);
+        ctx.fill();
+      }
+
+      // main cluster shape — use bumpy edge for natural look
+      ctx.fillStyle = `hsl(${f.hue}, ${f.sat}%, ${f.lit}%)`;
+      ctx.beginPath();
+      const bumps = 8;
+      for (let i = 0; i <= bumps; i++) {
+        const a = (i / bumps) * TAU;
+        const bumpR = f.r * (0.85 + Math.sin(a * 3 + f.leafPhase) * 0.15);
+        const bx = fx + Math.cos(a) * bumpR;
+        const by = fy + Math.sin(a) * bumpR * 0.85;
+        if (i === 0) ctx.moveTo(bx, by);
+        else ctx.lineTo(bx, by);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      // leaf texture — small arcs inside cluster
+      if (f.layer >= 1) {
+        ctx.fillStyle = `hsla(${f.hue + 5}, ${f.sat + 5}%, ${f.lit + 6}%, 0.4)`;
+        for (let i = 0; i < 4; i++) {
+          const la = f.leafPhase + i * 1.7;
+          const lr = f.r * 0.4;
+          const lx = fx + Math.cos(la) * lr;
+          const ly = fy + Math.sin(la) * lr * 0.8;
+          ctx.beginPath();
+          ctx.ellipse(lx, ly, f.r * 0.2, f.r * 0.12, la, 0, TAU);
+          ctx.fill();
+        }
+      }
+    }
+
+    // overall canopy highlight (sun-facing side)
+    const hlGrad = ctx.createRadialGradient(topX - this.canopyR * 0.3, topY - this.canopyR * 0.3, 0, topX, topY, this.canopyR);
+    hlGrad.addColorStop(0, 'rgba(160,220,80,0.12)');
+    hlGrad.addColorStop(0.5, 'rgba(140,200,80,0.05)');
+    hlGrad.addColorStop(1, 'rgba(140,200,80,0)');
+    ctx.fillStyle = hlGrad;
+    ctx.beginPath();
+    ctx.arc(topX, topY, this.canopyR * 0.9, 0, TAU);
+    ctx.fill();
+  }
+}
+
+/* ── Squirrel ────────────────────────────────────────── */
+class Squirrel {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(28, 42);
+    this.speed = rand(0.8, 2.0);
+    this.dir = Math.random() < 0.5 ? 1 : -1;
+    this.runPhase = rand(0, TAU);
+    // place on ground line
+    const gx = initial ? rand(50, this.screenW - 50) : 0;
+    this.groundY = this.screenH * 0.85 + Math.sin(gx * 0.005 + 4) * 20 + Math.sin(gx * 0.015) * 8;
+    this.tailPhase = rand(0, TAU);
+    if (initial) {
+      this.x = rand(50, this.screenW - 50);
+    } else {
+      this.x = this.dir > 0 ? -this.size * 3 : this.screenW + this.size * 3;
+    }
+    // sometimes pause
+    this.pauseTimer = 0;
+    this.isPaused = false;
+    this.pauseDuration = rand(40, 120);
+    this.runDuration = rand(60, 200);
+  }
+  update(speedMul) {
+    this.runPhase += 0.15 * speedMul;
+    this.tailPhase += 0.06 * speedMul;
+    this.pauseTimer += speedMul;
+
+    if (this.isPaused) {
+      if (this.pauseTimer > this.pauseDuration) {
+        this.isPaused = false;
+        this.pauseTimer = 0;
+        this.runDuration = rand(60, 200);
+        // sometimes change direction
+        if (Math.random() < 0.3) this.dir *= -1;
+      }
+    } else {
+      this.x += this.dir * this.speed * speedMul * 1.5;
+      if (this.pauseTimer > this.runDuration) {
+        this.isPaused = true;
+        this.pauseTimer = 0;
+        this.pauseDuration = rand(40, 120);
+      }
+    }
+    const margin = this.size * 5;
+    if (this.x < -margin || this.x > this.screenW + margin) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    const bob = this.isPaused ? 0 : Math.abs(Math.sin(this.runPhase)) * s * 0.15;
+    ctx.save();
+    ctx.translate(this.x, this.groundY - bob);
+    ctx.scale(this.dir, 1);
+
+    // tail (big fluffy)
+    const tailWave = Math.sin(this.tailPhase) * 0.2;
+    ctx.fillStyle = '#8a6030';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.3, -s * 0.1);
+    ctx.bezierCurveTo(-s * 0.7, -s * 0.6 + tailWave * s, -s * 0.9, -s * 1.2, -s * 0.5, -s * 1.3 + tailWave * s);
+    ctx.bezierCurveTo(-s * 0.2, -s * 1.2, -s * 0.1, -s * 0.7, -s * 0.2, -s * 0.3);
+    ctx.fill();
+    // tail highlight
+    ctx.fillStyle = '#a07840';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.3, -s * 0.2);
+    ctx.bezierCurveTo(-s * 0.55, -s * 0.5 + tailWave * s, -s * 0.7, -s * 1.0, -s * 0.45, -s * 1.1 + tailWave * s);
+    ctx.bezierCurveTo(-s * 0.25, -s * 1.0, -s * 0.15, -s * 0.6, -s * 0.2, -s * 0.3);
+    ctx.fill();
+
+    // body
+    ctx.fillStyle = '#7a5528';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.35, s * 0.25, 0, 0, TAU);
+    ctx.fill();
+
+    // belly
+    ctx.fillStyle = '#c8a870';
+    ctx.beginPath();
+    ctx.ellipse(s * 0.05, s * 0.08, s * 0.2, s * 0.15, 0, 0, TAU);
+    ctx.fill();
+
+    // head
+    ctx.fillStyle = '#7a5528';
+    ctx.beginPath();
+    ctx.arc(s * 0.35, -s * 0.15, s * 0.18, 0, TAU);
+    ctx.fill();
+
+    // ear
+    ctx.fillStyle = '#6a4820';
+    ctx.beginPath();
+    ctx.ellipse(s * 0.38, -s * 0.32, s * 0.06, s * 0.1, 0.2, 0, TAU);
+    ctx.fill();
+
+    // eye
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(s * 0.42, -s * 0.17, s * 0.035, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s * 0.43, -s * 0.18, s * 0.015, 0, TAU);
+    ctx.fill();
+
+    // nose
+    ctx.fillStyle = '#3a2010';
+    ctx.beginPath();
+    ctx.arc(s * 0.52, -s * 0.12, s * 0.025, 0, TAU);
+    ctx.fill();
+
+    // legs
+    const legPhase = this.isPaused ? 0 : Math.sin(this.runPhase);
+    ctx.fillStyle = '#6a4820';
+    // front legs
+    ctx.beginPath();
+    ctx.ellipse(s * 0.2 + legPhase * s * 0.05, s * 0.2, s * 0.06, s * 0.12, 0.1, 0, TAU);
+    ctx.fill();
+    // back legs
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.15 - legPhase * s * 0.05, s * 0.18, s * 0.07, s * 0.13, -0.1, 0, TAU);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+/* ── Rabbit ──────────────────────────────────────────── */
+class Rabbit {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.size = rand(30, 48);
+    this.speed = rand(0.5, 1.5);
+    this.dir = Math.random() < 0.5 ? 1 : -1;
+    this.hopPhase = rand(0, TAU);
+    // place on ground line
+    const gx = initial ? rand(50, this.screenW - 50) : 0;
+    this.groundY = this.screenH * 0.85 + Math.sin(gx * 0.005 + 4) * 20 + Math.sin(gx * 0.015) * 8;
+    this.color = pick(['#b0a090', '#8a7a68', '#c8b8a0', '#706050']);
+    if (initial) {
+      this.x = rand(50, this.screenW - 50);
+    } else {
+      this.x = this.dir > 0 ? -this.size * 3 : this.screenW + this.size * 3;
+    }
+    this.pauseTimer = 0;
+    this.isPaused = true; // rabbits start sitting
+    this.pauseDuration = rand(100, 300);
+    this.hopDuration = rand(30, 80);
+    this.isHopping = false;
+    this.earTwitch = rand(0, TAU);
+  }
+  update(speedMul) {
+    this.hopPhase += 0.2 * speedMul;
+    this.earTwitch += 0.05 * speedMul;
+    this.pauseTimer += speedMul;
+
+    if (this.isPaused) {
+      if (this.pauseTimer > this.pauseDuration) {
+        this.isPaused = false;
+        this.isHopping = true;
+        this.pauseTimer = 0;
+        this.hopDuration = rand(30, 80);
+        if (Math.random() < 0.4) this.dir *= -1;
+      }
+    } else {
+      this.x += this.dir * this.speed * speedMul * 2;
+      if (this.pauseTimer > this.hopDuration) {
+        this.isPaused = true;
+        this.isHopping = false;
+        this.pauseTimer = 0;
+        this.pauseDuration = rand(100, 300);
+      }
+    }
+    const margin = this.size * 5;
+    if (this.x < -margin || this.x > this.screenW + margin) {
+      this.reset(false);
+    }
+  }
+  draw(ctx) {
+    const s = this.size;
+    const hop = this.isHopping ? Math.abs(Math.sin(this.hopPhase)) * s * 0.5 : 0;
+    const stretch = this.isHopping ? 1 + Math.abs(Math.sin(this.hopPhase)) * 0.15 : 1;
+    ctx.save();
+    ctx.translate(this.x, this.groundY - hop);
+    ctx.scale(this.dir, 1);
+
+    // body
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.4 * stretch, s * 0.3, 0, 0, TAU);
+    ctx.fill();
+
+    // cotton tail
+    ctx.fillStyle = '#f0e8e0';
+    ctx.beginPath();
+    ctx.arc(-s * 0.38, -s * 0.05, s * 0.1, 0, TAU);
+    ctx.fill();
+
+    // head
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.arc(s * 0.35, -s * 0.2, s * 0.2, 0, TAU);
+    ctx.fill();
+
+    // ears
+    const earTwitch1 = Math.sin(this.earTwitch) * 0.1;
+    const earTwitch2 = Math.sin(this.earTwitch + 1.5) * 0.08;
+    ctx.fillStyle = this.color;
+    ctx.save();
+    ctx.translate(s * 0.3, -s * 0.38);
+    ctx.rotate(-0.2 + earTwitch1);
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 0.3, s * 0.06, s * 0.25, 0, 0, TAU);
+    ctx.fill();
+    // inner ear
+    ctx.fillStyle = '#e0b0b0';
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 0.3, s * 0.035, s * 0.18, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = this.color;
+    ctx.save();
+    ctx.translate(s * 0.38, -s * 0.36);
+    ctx.rotate(0.15 + earTwitch2);
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 0.28, s * 0.055, s * 0.23, 0, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#e0b0b0';
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 0.28, s * 0.03, s * 0.16, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    // eye
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(s * 0.44, -s * 0.22, s * 0.035, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s * 0.45, -s * 0.23, s * 0.012, 0, TAU);
+    ctx.fill();
+
+    // nose
+    ctx.fillStyle = '#d09090';
+    ctx.beginPath();
+    ctx.ellipse(s * 0.53, -s * 0.17, s * 0.025, s * 0.02, 0, 0, TAU);
+    ctx.fill();
+
+    // whiskers
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = 0.4;
+    for (let i = -1; i <= 1; i += 2) {
+      ctx.beginPath();
+      ctx.moveTo(s * 0.5, -s * 0.16 + i * s * 0.03);
+      ctx.lineTo(s * 0.7, -s * 0.18 + i * s * 0.06);
+      ctx.stroke();
+    }
+
+    // legs
+    ctx.fillStyle = this.color;
+    if (this.isHopping) {
+      const lp = Math.sin(this.hopPhase);
+      // back legs (powerful)
+      ctx.beginPath();
+      ctx.ellipse(-s * 0.2 - lp * s * 0.1, s * 0.2, s * 0.12, s * 0.08, -0.3, 0, TAU);
+      ctx.fill();
+      // front legs
+      ctx.beginPath();
+      ctx.ellipse(s * 0.2 + lp * s * 0.08, s * 0.22, s * 0.06, s * 0.1, 0.1, 0, TAU);
+      ctx.fill();
+    } else {
+      // sitting pose — haunches
+      ctx.beginPath();
+      ctx.ellipse(-s * 0.15, s * 0.18, s * 0.15, s * 0.1, 0, 0, TAU);
+      ctx.fill();
+      // front paws tucked
+      ctx.beginPath();
+      ctx.ellipse(s * 0.25, s * 0.22, s * 0.06, s * 0.08, 0, 0, TAU);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+/* ── Raindrop ────────────────────────────────────────── */
+class Raindrop {
+  constructor(w, h) {
+    this.screenW = w;
+    this.screenH = h;
+    this.reset(true);
+  }
+  reset(initial) {
+    this.x = rand(-20, this.screenW + 20);
+    this.y = initial ? rand(-this.screenH, 0) : rand(-60, -10);
+    this.speed = rand(8, 16);
+    this.length = rand(8, 20);
+    this.alpha = rand(0.15, 0.4);
+  }
+  update(speedMul, windMul) {
+    this.y += this.speed * speedMul;
+    this.x += windMul * 2 * speedMul;
+    if (this.y > this.screenH + 10) this.reset(false);
+  }
+  draw(ctx) {
+    ctx.strokeStyle = `rgba(180, 200, 230, ${this.alpha})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(this.x, this.y);
+    ctx.lineTo(this.x + windX * 2, this.y + this.length);
+    ctx.stroke();
+  }
+}
+
+/* ── Lightning ───────────────────────────────────────── */
+function drawLightning(ctx, w, h) {
+  const x = rand(w * 0.1, w * 0.9);
+  ctx.strokeStyle = 'rgba(255, 255, 240, 0.9)';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = 'rgba(200, 220, 255, 0.8)';
+  ctx.shadowBlur = 20;
+  let bx = x, by = 0;
+  ctx.beginPath();
+  ctx.moveTo(bx, by);
+  const segs = Math.floor(rand(4, 8));
+  for (let i = 0; i < segs; i++) {
+    bx += rand(-40, 40);
+    by += h / segs * rand(0.6, 1.2);
+    ctx.lineTo(bx, by);
+    // branch
+    if (Math.random() < 0.3) {
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      const brX = bx + rand(-50, 50);
+      const brY = by + rand(20, 60);
+      ctx.lineTo(brX, brY);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+    }
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+/* ── Weather System ──────────────────────────────────── */
+const WEATHER = { CLEAR: 0, CLOUDY: 1, RAIN: 2, STORM: 3 };
+let weather = {
+  current: WEATHER.CLEAR,
+  target: WEATHER.CLEAR,
+  transition: 0, // 0-1
+  timer: 0,
+  duration: rand(600, 1500),
+  overlay: 0, // darkness overlay 0-1
+  lightningTimer: 0,
+  lightningFlash: 0,
+  raindrops: [],
+};
+
+function updateWeather(speedMul, W, H) {
+  weather.timer += speedMul;
+  if (weather.timer > weather.duration) {
+    weather.timer = 0;
+    weather.duration = rand(600, 1500);
+    // pick next weather — weighted toward clear
+    const roll = Math.random();
+    if (roll < 0.45) weather.target = WEATHER.CLEAR;
+    else if (roll < 0.7) weather.target = WEATHER.CLOUDY;
+    else if (roll < 0.9) weather.target = WEATHER.RAIN;
+    else weather.target = WEATHER.STORM;
+  }
+
+  // smooth transition
+  const targetOverlay = [0, 0.2, 0.35, 0.5][weather.target];
+  weather.overlay += (targetOverlay - weather.overlay) * 0.005 * speedMul;
+  weather.current = weather.overlay < 0.1 ? WEATHER.CLEAR :
+                    weather.overlay < 0.25 ? WEATHER.CLOUDY :
+                    weather.overlay < 0.4 ? WEATHER.RAIN : WEATHER.STORM;
+
+  // rain
+  const targetRainCount = weather.current >= WEATHER.RAIN ? (weather.current === WEATHER.STORM ? 300 : 150) : 0;
+  while (weather.raindrops.length < targetRainCount) weather.raindrops.push(new Raindrop(W, H));
+  while (weather.raindrops.length > targetRainCount) weather.raindrops.pop();
+  weather.raindrops.forEach(r => r.update(speedMul, windX));
+
+  // lightning
+  if (weather.current === WEATHER.STORM) {
+    weather.lightningTimer += speedMul;
+    if (weather.lightningTimer > rand(120, 400)) {
+      weather.lightningFlash = 1;
+      weather.lightningTimer = 0;
+    }
+  }
+  weather.lightningFlash *= 0.9;
+}
+
+function isStormy() {
+  return weather.current >= WEATHER.RAIN;
+}
+
+/* ── Main ────────────────────────────────────────────── */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let butterflies = [], bees = [], ladybugs = [], dragonflies = [], birds = [];
+let squirrels = [], rabbits = [];
+let petals = [], dandelionSeeds = [], particles = [];
+let flowers = [], grass = [], clouds = [], sunRays = [], trees = [];
+let speedMul = 1;
+let time = 0;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  const W = canvas.width, H = canvas.height;
+
+  butterflies = Array.from({ length: 8 }, () => new Butterfly(W, H));
+  bees = Array.from({ length: 5 }, () => new Bee(W, H));
+  ladybugs = Array.from({ length: 4 }, () => new Ladybug(W, H));
+  dragonflies = Array.from({ length: 3 }, () => new Dragonfly(W, H));
+  birds = Array.from({ length: 6 }, () => new Bird(W, H));
+  squirrels = Array.from({ length: 3 }, () => new Squirrel(W, H));
+  rabbits = Array.from({ length: 3 }, () => new Rabbit(W, H));
+  petals = Array.from({ length: 25 }, () => new Petal(W, H));
+  dandelionSeeds = Array.from({ length: 10 }, () => new DandelionSeed(W, H));
+  particles = Array.from({ length: 50 }, () => new Particle(W, H));
+  clouds = Array.from({ length: 5 }, () => new Cloud(W, H));
+  sunRays = Array.from({ length: 6 }, () => new SunRay(W, H));
+
+  // trees — placed on the hills in the background
+  trees = [];
+  const treeCount = Math.max(3, Math.floor(W / 200));
+  for (let i = 0; i < treeCount; i++) {
+    const tx = W * (0.05 + 0.9 * (i + rand(0.15, 0.85)) / treeCount);
+    // place on mid or far hills, not the near ground
+    const hillChoice = rand(0, 1);
+    let groundY;
+    if (hillChoice < 0.5) {
+      // far hills
+      groundY = H * 0.72 + Math.sin(tx * 0.003 + 1) * 40 + Math.sin(tx * 0.008) * 20;
+    } else {
+      // mid hills
+      groundY = H * 0.78 + Math.sin(tx * 0.004 + 2.5) * 30 + Math.sin(tx * 0.01 + 1) * 15;
+    }
+    trees.push(new Tree(tx, groundY, W, H));
+  }
+
+  // ground flowers - dense, choking the bottom
+  flowers = Array.from({ length: Math.floor(W / 8) }, () => {
+    const f = new Flower(W, H);
+    f.bloomPhase = rand(0, 1);
+    f.age = rand(0, f.maxAge * 0.6);
+    return f;
+  });
+
+  // grass blades
+  grass = [];
+  const groundY = H * 0.85;
+  for (let x = 0; x < W; x += rand(3, 8)) {
+    const localGround = groundY + Math.sin(x * 0.005 + 4) * 20 + Math.sin(x * 0.015) * 8;
+    grass.push(new GrassBlade(x, localGround, rand(15, 50)));
+  }
+
+  // init raindrops
+  weather.raindrops = [];
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+const speedInput = document.getElementById('speed');
+const speedVal = document.getElementById('speedVal');
+speedInput.addEventListener('input', () => {
+  speedMul = parseFloat(speedInput.value);
+  speedVal.textContent = speedMul.toFixed(1);
+});
+
+function animate() {
+  const dt = 1 / 60;
+  time += dt * speedMul;
+  updateWind(dt * speedMul);
+  updateWeather(speedMul, canvas.width, canvas.height);
+  skyPhase = (skyPhase + 0.0001 * speedMul) % 1;
+
+  const W = canvas.width, H = canvas.height;
+  const stormy = isStormy();
+  // creatures flee offscreen in rain/storm, not fade
+  const creaturesHiding = weather.current >= WEATHER.RAIN;
+
+  // sky — darken with weather
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.85);
+  skyGrad.addColorStop(0, skyColor(skyPhase));
+  skyGrad.addColorStop(1, skyColor((skyPhase + 0.25) % 1));
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // sun (fade in bad weather)
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, 1 - weather.overlay * 2);
+  drawSun(ctx, W, H, time);
+  ctx.restore();
+
+  // weather overlay
+  if (weather.overlay > 0.01) {
+    ctx.fillStyle = `rgba(60, 65, 75, ${weather.overlay})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // lightning flash
+  if (weather.lightningFlash > 0.05) {
+    ctx.fillStyle = `rgba(220, 225, 240, ${weather.lightningFlash * 0.3})`;
+    ctx.fillRect(0, 0, W, H);
+    if (weather.lightningFlash > 0.8) drawLightning(ctx, W, H);
+  }
+
+  // clouds (more in bad weather)
+  clouds.forEach(c => { c.update(speedMul); c.draw(ctx); });
+  // extra storm clouds — draw as slow-drifting layered blobs
+  if (weather.current >= WEATHER.CLOUDY) {
+    ctx.fillStyle = `rgba(100, 105, 115, ${weather.overlay * 0.5})`;
+    for (let i = 0; i < 6; i++) {
+      const cx = (time * 12 + i * W * 0.22) % (W + 400) - 200;
+      const cy = H * 0.06 + i * H * 0.03 + Math.sin(i * 2.7) * H * 0.02;
+      const cr = 70 + (i % 3) * 30 + Math.sin(i * 1.9) * 15;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cr, 0, TAU);
+      ctx.fill();
+      // extra blob overlap for volume
+      ctx.beginPath();
+      ctx.arc(cx + cr * 0.5, cy + cr * 0.15, cr * 0.7, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  // sun rays (only clear/light cloudy)
+  if (weather.current <= WEATHER.CLOUDY) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, 1 - weather.overlay * 3);
+    sunRays.forEach(r => r.draw(ctx, time));
+    ctx.restore();
+  }
+
+  // back hills
+  drawBackHills(ctx, W, H);
+
+  // trees on the hills (behind near ground)
+  trees.forEach(t => t.draw(ctx, time));
+
+  // near ground in front of trees
+  drawNearGround(ctx, W, H);
+
+  // grass
+  grass.forEach(g => g.draw(ctx, time));
+
+  // flowers — remove dead, spawn replacements
+  flowers = flowers.filter(f => !f.dead);
+  const targetFlowers = Math.floor(W / 8);
+  while (flowers.length < targetFlowers) {
+    flowers.push(new Flower(W, H));
+  }
+  // ground animals BEFORE flowers so flowers cover their feet naturally
+  squirrels.forEach(sq => { sq.update(speedMul); sq.draw(ctx); });
+  rabbits.forEach(rb => { rb.update(speedMul); rb.draw(ctx); });
+
+  flowers.forEach(f => { f.update(speedMul); f.draw(ctx, time); });
+
+  // particles always visible
+  particles.forEach(p => { p.update(speedMul); p.draw(ctx); });
+  dandelionSeeds.forEach(d => { d.update(speedMul); d.draw(ctx); });
+  petals.forEach(p => { p.update(speedMul); p.draw(ctx); });
+
+  // flying creatures: visible normally, flee offscreen in rain/storm
+  if (!creaturesHiding) {
+    ladybugs.forEach(l => { l.tryRest(flowers); l.update(speedMul, time); l.draw(ctx); });
+    bees.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
+    butterflies.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
+    dragonflies.forEach(d => { d.update(speedMul); d.draw(ctx); });
+    birds.forEach(b => { b.tryPerch(trees); b.update(speedMul); b.draw(ctx); });
+  } else {
+    // push them offscreen quickly
+    const flee = 4 * speedMul;
+    butterflies.forEach(b => { b.resting = false; b.y -= flee; b.x += flee * 2; if (b.y > -100) b.draw(ctx); });
+    bees.forEach(b => { b.resting = false; b.y -= flee; b.x += flee * 2; if (b.y > -100) b.draw(ctx); });
+    ladybugs.forEach(l => { l.resting = false; l.y -= flee * 0.5; l.x += flee; if (l.y > -50) l.draw(ctx); });
+    dragonflies.forEach(d => { d.y -= flee * 1.5; d.x += flee * 2; if (d.y > -100) d.draw(ctx); });
+    birds.forEach(b => {
+      if (b.state === 'perched' && b.perchTree && b.perchIdx >= 0) {
+        b.perchTree.perchPoints[b.perchIdx].occupied = false;
+      }
+      b.state = 'flying'; b.resting = false;
+      b.y -= flee * 1.2; b.x += flee * 3;
+      if (b.y > -100) b.draw(ctx);
+    });
+  }
+
+  // rain on top of everything
+  weather.raindrops.forEach(r => r.draw(ctx));
+
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>
