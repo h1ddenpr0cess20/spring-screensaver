@@ -2395,6 +2395,7 @@ let petals = [], dandelionSeeds = [], particles = [];
 let flowers = [], grass = [], clouds = [], sunRays = [], trees = [];
 let speedMul = 1;
 let time = 0;
+let fleeFactor = 0;
 
 function resize() {
   canvas.width = window.innerWidth;
@@ -2556,28 +2557,49 @@ function animate() {
   dandelionSeeds.forEach(d => { d.update(speedMul); d.draw(ctx); });
   petals.forEach(p => { p.update(speedMul); p.draw(ctx); });
 
-  // flying creatures: visible normally, flee offscreen in rain/storm
-  if (!creaturesHiding) {
+  // flying creatures: visible normally, flee gradually in rain/storm
+  // fleeFactor ramps up smoothly when stormy, back down when clear
+  if (creaturesHiding) {
+    fleeFactor = Math.min(1, fleeFactor + 0.008 * speedMul);
+  } else {
+    fleeFactor = Math.max(0, fleeFactor - 0.015 * speedMul);
+  }
+
+  if (fleeFactor < 0.01) {
+    // normal behavior
     ladybugs.forEach(l => { l.tryRest(flowers); l.update(speedMul, time); l.draw(ctx); });
     bees.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
     butterflies.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
     dragonflies.forEach(d => { d.update(speedMul); d.draw(ctx); });
     birds.forEach(b => { b.tryPerch(trees); b.update(speedMul); b.draw(ctx); });
   } else {
-    // push them offscreen quickly
-    const flee = 4 * speedMul;
-    butterflies.forEach(b => { b.resting = false; b.y -= flee; b.x += flee * 2; if (b.y > -100) b.draw(ctx); });
-    bees.forEach(b => { b.resting = false; b.y -= flee; b.x += flee * 2; if (b.y > -100) b.draw(ctx); });
-    ladybugs.forEach(l => { l.resting = false; l.y -= flee * 0.5; l.x += flee; if (l.y > -50) l.draw(ctx); });
-    dragonflies.forEach(d => { d.y -= flee * 1.5; d.x += flee * 2; if (d.y > -100) d.draw(ctx); });
-    birds.forEach(b => {
-      if (b.state === 'perched' && b.perchTree && b.perchIdx >= 0) {
-        b.perchTree.perchPoints[b.perchIdx].occupied = false;
+    // flee — accelerate gradually based on fleeFactor
+    const fleeAmt = fleeFactor * fleeFactor * 6 * speedMul; // quadratic ramp
+    const allFlyers = [
+      ...butterflies.map(c => ({ c, sx: 1.5, sy: 1.0, type: 'bug' })),
+      ...bees.map(c => ({ c, sx: 1.8, sy: 1.2, type: 'bug' })),
+      ...ladybugs.map(c => ({ c, sx: 0.8, sy: 0.5, type: 'bug' })),
+      ...dragonflies.map(c => ({ c, sx: 2.5, sy: 1.8, type: 'fly' })),
+      ...birds.map(c => ({ c, sx: 3.0, sy: 1.5, type: 'bird' })),
+    ];
+    for (const { c, sx, sy, type } of allFlyers) {
+      // break resting on first flee frame
+      if (c.resting) c.resting = false;
+      if (type === 'bird' && c.state === 'perched') {
+        if (c.perchTree && c.perchIdx >= 0) {
+          c.perchTree.perchPoints[c.perchIdx].occupied = false;
+        }
+        c.state = 'flying';
+        c.speed = (Math.random() < 0.5 ? 1 : -1) * rand(2, 3.5);
       }
-      b.state = 'flying'; b.resting = false;
-      b.y -= flee * 1.2; b.x += flee * 3;
-      if (b.y > -100) b.draw(ctx);
-    });
+      // scatter in varied directions (based on position)
+      const dirX = c.x < W * 0.5 ? -1 : 1;
+      c.x += dirX * fleeAmt * sx;
+      c.y -= fleeAmt * sy;
+      // keep animating wings while fleeing
+      if (c.wingPhase !== undefined) c.wingPhase += (c.wingSpeed || 0.1) * speedMul;
+      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
+    }
   }
 
   // rain on top of everything
