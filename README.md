@@ -28,3 +28,8 @@ Native XScreenSaver (X11/Cairo) conversion is planned.
 ## Credits
 
 Based on [Flying Air Fryers](https://github.com/h1ddenpr0cess20/flying-air-fryers) by [h1ddenpr0cess20](https://github.com/h1ddenpr0cess20).
+
+## Screenshot
+
+<img width="1718" height="1291" alt="image" src="https://github.com/user-attachments/assets/e8d9c63e-4c0c-4913-93aa-c0dec8df8ebd" />
+
