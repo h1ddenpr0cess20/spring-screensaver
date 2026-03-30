@@ -167,11 +167,13 @@ class Flower {
         side: Math.random() < 0.5 ? 1 : -1,
         size: rand(8, 18),
         angle: rand(0.2, 0.8),
+        hueVar: rand(-5, 5),
+        litVar: rand(-3, 5),
       });
     }
     this.age = 0;
-    this.maxAge = rand(400, 900);
-    this.fadeAlpha = 1;
+    this.maxAge = rand(800, 1800);
+    this.wiltDuration = rand(120, 250);
     this.dead = false;
   }
   _pickHue() {
@@ -215,17 +217,22 @@ class Flower {
     this.bloomPhase = Math.min(1, this.bloomPhase + this.bloomSpeed * speedMul);
     this.age += speedMul;
     if (this.age > this.maxAge) {
-      this.fadeAlpha = Math.max(0, this.fadeAlpha - 0.008 * speedMul);
-      if (this.fadeAlpha <= 0) this.dead = true;
+      // wilt phase: droop and shrink over wiltDuration frames
+      this.wiltProgress = Math.min(1, (this.age - this.maxAge) / this.wiltDuration);
+      if (this.wiltProgress >= 1) this.dead = true;
+    } else {
+      this.wiltProgress = 0;
     }
   }
   draw(ctx, time) {
-    if (this.fadeAlpha <= 0) return;
     ctx.save();
-    ctx.globalAlpha = this.fadeAlpha;
-    const sway = Math.sin(time * 1.0 + this.swayOffset) * 6 * (this.stemH / 140);
-    const tipX = this.x + sway + this.stemCurve * 0.3;
-    const tipY = this.groundY - this.stemH;
+    const w = this.wiltProgress || 0;
+    // wilting: stem droops, bloom shrinks, colors desaturate
+    const droopX = w * w * this.stemH * 0.25 * (this.stemCurve > 0 ? 1 : -1);
+    const droopY = w * w * this.stemH * 0.3;
+    const sway = Math.sin(time * 1.0 + this.swayOffset) * 6 * (this.stemH / 140) * (1 - w * 0.7);
+    const tipX = this.x + sway + this.stemCurve * 0.3 + droopX;
+    const tipY = this.groundY - this.stemH + droopY;
 
     // stem — tapered
     ctx.strokeStyle = `hsl(${this.stemHue}, 55%, 28%)`;
@@ -249,7 +256,7 @@ class Flower {
       const ly = this.groundY - this.stemH * leaf.t;
       const lt = leaf.t;
       const lx = (1-lt)*(1-lt)*this.x + 2*(1-lt)*lt*(this.x + this.stemCurve) + lt*lt*tipX;
-      ctx.fillStyle = `hsl(${this.stemHue + rand(-5,5)}, 50%, ${30 + rand(-3,5)}%)`;
+      ctx.fillStyle = `hsl(${this.stemHue + leaf.hueVar}, 50%, ${30 + leaf.litVar}%)`;
       ctx.save();
       ctx.translate(lx, ly);
       ctx.rotate(leaf.angle * leaf.side + Math.sin(time * 0.8 + this.swayOffset + leaf.t) * 0.1);
@@ -272,10 +279,12 @@ class Flower {
 
     // flower head
     if (this.bloomPhase > 0.05) {
-      const bloom = this.bloomPhase;
+      const bloom = this.bloomPhase * (1 - w * 0.4);
       const ps = this.petalSize * bloom;
       ctx.save();
       ctx.translate(tipX, tipY);
+      // wilt: droop the flower head
+      if (w > 0) ctx.rotate(w * w * 1.2 * (this.stemCurve > 0 ? 1 : -1));
 
       switch (this.type) {
         case 'daisy':
@@ -304,19 +313,21 @@ class Flower {
   }
 
   _drawDaisy(ctx, ps, bloom, time) {
+    const swayAngle = Math.sin(time * 0.8 + this.swayOffset) * 0.05;
+    const step = TAU / this.petalCount;
+    const fillColor = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.88)`;
+    const strokeColor = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 20}%, 0.2)`;
     for (let i = 0; i < this.petalCount; i++) {
-      const a = (i / this.petalCount) * TAU + Math.sin(time * 0.8 + this.swayOffset) * 0.05;
       ctx.save();
-      ctx.rotate(a);
-      ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.88)`;
+      ctx.rotate(i * step + swayAngle);
+      ctx.fillStyle = fillColor;
       ctx.beginPath();
-      // rounded petal with slight point
       ctx.moveTo(2, 0);
       ctx.bezierCurveTo(ps * 0.3, -ps * 0.3, ps * 0.8, -ps * 0.35, ps * 1.1, -ps * 0.05);
       ctx.bezierCurveTo(ps * 1.15, ps * 0.05, ps * 0.8, ps * 0.35, ps * 0.3, ps * 0.3);
       ctx.lineTo(2, 0);
       ctx.fill();
-      ctx.strokeStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 20}%, 0.2)`;
+      ctx.strokeStyle = strokeColor;
       ctx.lineWidth = 0.4;
       ctx.beginPath();
       ctx.moveTo(3, 0);
@@ -400,17 +411,20 @@ class Flower {
   }
 
   _drawSunflower(ctx, ps, bloom, time) {
-    // two layers of long thin petals
+    const swayAngle = Math.sin(time * 0.5 + this.swayOffset) * 0.03;
+    const step = TAU / this.petalCount;
+    const halfStep = step / 2;
+    const colors = [
+      `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.9)`,
+      `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - 10}%, 0.9)`,
+    ];
     for (let layer = 0; layer < 2; layer++) {
-      const rot = layer * (TAU / this.petalCount / 2);
-      const litAdj = layer * 10;
+      const rot = layer * halfStep;
+      ctx.fillStyle = colors[layer];
       for (let i = 0; i < this.petalCount; i++) {
-        const a = (i / this.petalCount) * TAU + rot + Math.sin(time * 0.5 + this.swayOffset) * 0.03;
         ctx.save();
-        ctx.rotate(a);
-        ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit - litAdj}%, 0.9)`;
+        ctx.rotate(i * step + rot + swayAngle);
         ctx.beginPath();
-        // long narrow petal
         ctx.moveTo(2, 0);
         ctx.bezierCurveTo(ps * 0.3, -ps * 0.18, ps * 0.85, -ps * 0.15, ps * 1.3, 0);
         ctx.bezierCurveTo(ps * 0.85, ps * 0.15, ps * 0.3, ps * 0.18, 2, 0);
@@ -442,19 +456,18 @@ class Flower {
 
   _drawPoppy(ctx, ps, bloom, time) {
     // wide crinkled petals
+    const step = TAU / this.petalCount;
+    const fillColor = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.88)`;
     for (let i = 0; i < this.petalCount; i++) {
-      const a = (i / this.petalCount) * TAU;
       ctx.save();
-      ctx.rotate(a);
-      ctx.fillStyle = `hsla(${this.petalHue}, ${this.petalSat}%, ${this.petalLit}%, 0.88)`;
+      ctx.rotate(i * step);
+      ctx.fillStyle = fillColor;
       ctx.beginPath();
       ctx.moveTo(0, 0);
-      // wide ruffled shape
       ctx.bezierCurveTo(ps * 0.5, -ps * 0.6, ps * 1.0, -ps * 0.7, ps * 1.1, -ps * 0.1);
       ctx.bezierCurveTo(ps * 1.1, ps * 0.3, ps * 0.6, ps * 0.6, 0, 0);
       ctx.fill();
-      // dark base blotch
-      ctx.fillStyle = `hsla(0, 0%, 8%, 0.4)`;
+      ctx.fillStyle = 'hsla(0, 0%, 8%, 0.4)';
       ctx.beginPath();
       ctx.arc(ps * 0.25, 0, ps * 0.18, 0, TAU);
       ctx.fill();
@@ -513,6 +526,19 @@ class Flower {
     ctx.fill();
     ctx.restore();
   }
+}
+
+function makeHillFlower(w, h, x, groundY, scale) {
+  const f = new Flower(w, h);
+  f.x = x;
+  f.groundY = groundY;
+  f.stemH = rand(8, 30) * scale;
+  f.petalSize *= scale;
+  f.centerSize *= scale;
+  f.stemWidth *= scale;
+  f.stemCurve *= scale;
+  for (const lf of f.leafPositions) lf.size *= scale;
+  return f;
 }
 
 /* ── Butterfly (vertical wings, proper forewing + hindwing) ── */
@@ -1656,24 +1682,27 @@ class Particle {
   }
 }
 
-/* ── Sunlight Ray (subtle god-rays) ──────────────────── */
+/* ── Sunlight Ray (subtle god-rays from sun position) ── */
 class SunRay {
-  constructor(w, h) {
+  constructor(w, h, index, total) {
     this.screenW = w;
     this.screenH = h;
-    this.angle = rand(-0.4, 0.4);
-    this.width = rand(40, 120);
-    this.alpha = rand(0.02, 0.06);
+    // evenly spread rays around center, fanning out from sun
+    const spread = 0.6;
+    this.angle = ((index / (total - 1)) - 0.5) * spread;
+    this.width = rand(50, 140);
+    this.alpha = rand(0.02, 0.05);
     this.drift = rand(0, TAU);
   }
   draw(ctx, time) {
     const a = this.alpha * (0.7 + 0.3 * Math.sin(time * 0.3 + this.drift));
     ctx.save();
-    ctx.translate(this.screenW * 0.8, 0);
-    ctx.rotate(this.angle + Math.sin(time * 0.1 + this.drift) * 0.02);
+    // match sun position exactly: w * 0.85, h * 0.08
+    ctx.translate(this.screenW * 0.85, this.screenH * 0.08);
+    ctx.rotate(this.angle + Math.sin(time * 0.1 + this.drift) * 0.015);
     const grad = ctx.createLinearGradient(0, 0, 0, this.screenH * 1.2);
     grad.addColorStop(0, `rgba(255, 250, 200, ${a})`);
-    grad.addColorStop(0.5, `rgba(255, 245, 180, ${a * 0.5})`);
+    grad.addColorStop(0.5, `rgba(255, 245, 180, ${a * 0.4})`);
     grad.addColorStop(1, `rgba(255, 240, 160, 0)`);
     ctx.fillStyle = grad;
     ctx.fillRect(-this.width / 2, 0, this.width, this.screenH * 1.2);
@@ -2392,7 +2421,7 @@ const ctx = canvas.getContext('2d');
 let butterflies = [], bees = [], ladybugs = [], dragonflies = [], birds = [];
 let squirrels = [], rabbits = [];
 let petals = [], dandelionSeeds = [], particles = [];
-let flowers = [], grass = [], clouds = [], sunRays = [], trees = [];
+let flowers = [], grass = [], clouds = [], sunRays = [], trees = [], farHillFlowers = [], midHillFlowers = [];
 let speedMul = 1;
 let time = 0;
 let fleeFactor = 0;
@@ -2409,11 +2438,15 @@ function resize() {
   birds = Array.from({ length: 6 }, () => new Bird(W, H));
   squirrels = Array.from({ length: 3 }, () => new Squirrel(W, H));
   rabbits = Array.from({ length: 3 }, () => new Rabbit(W, H));
-  petals = Array.from({ length: 25 }, () => new Petal(W, H));
-  dandelionSeeds = Array.from({ length: 10 }, () => new DandelionSeed(W, H));
-  particles = Array.from({ length: 50 }, () => new Particle(W, H));
+  petals = Array.from({ length: 12 }, () => new Petal(W, H));
+  dandelionSeeds = Array.from({ length: 5 }, () => new DandelionSeed(W, H));
+  particles = Array.from({ length: 25 }, () => new Particle(W, H));
   clouds = Array.from({ length: 5 }, () => new Cloud(W, H));
-  sunRays = Array.from({ length: 6 }, () => new SunRay(W, H));
+  sunRays = Array.from({ length: 6 }, (_, i) => new SunRay(W, H, i, 6));
+
+  // hill flowers — same as foreground but scaled for distance
+  farHillFlowers = [];
+  midHillFlowers = [];
 
   // trees — placed on the hills in the background
   trees = [];
@@ -2531,6 +2564,30 @@ function animate() {
   // back hills
   drawBackHills(ctx, W, H);
 
+  // far hill flowers — live, die, respawn like foreground
+  for (let i = farHillFlowers.length - 1; i >= 0; i--) {
+    if (farHillFlowers[i].dead) farHillFlowers.splice(i, 1);
+  }
+  const farTarget = Math.floor(W / 60);
+  while (farHillFlowers.length < farTarget) {
+    const x = rand(0, W);
+    const gy = H * 0.72 + Math.sin(x * 0.003 + 1) * 40 + Math.sin(x * 0.008) * 20 + rand(5, 50);
+    farHillFlowers.push(makeHillFlower(W, H, x, gy, 0.25));
+  }
+  farHillFlowers.forEach(f => { f.update(speedMul); f.draw(ctx, time); });
+
+  // mid hill flowers
+  for (let i = midHillFlowers.length - 1; i >= 0; i--) {
+    if (midHillFlowers[i].dead) midHillFlowers.splice(i, 1);
+  }
+  const midTarget = Math.floor(W / 45);
+  while (midHillFlowers.length < midTarget) {
+    const x = rand(0, W);
+    const gy = H * 0.78 + Math.sin(x * 0.004 + 2.5) * 30 + Math.sin(x * 0.01 + 1) * 15 + rand(5, 55);
+    midHillFlowers.push(makeHillFlower(W, H, x, gy, 0.35));
+  }
+  midHillFlowers.forEach(f => { f.update(speedMul); f.draw(ctx, time); });
+
   // trees on the hills (behind near ground)
   trees.forEach(t => t.draw(ctx, time));
 
@@ -2540,15 +2597,53 @@ function animate() {
   // grass
   grass.forEach(g => g.draw(ctx, time));
 
-  // flowers — remove dead, spawn replacements
-  flowers = flowers.filter(f => !f.dead);
+  // flowers — remove dead in-place, spawn replacements
+  for (let i = flowers.length - 1; i >= 0; i--) {
+    if (flowers[i].dead) flowers.splice(i, 1);
+  }
   const targetFlowers = Math.floor(W / 8);
   while (flowers.length < targetFlowers) {
     flowers.push(new Flower(W, H));
   }
+
+  // update flee factor before any creature rendering
+  if (creaturesHiding) {
+    fleeFactor = Math.min(1, fleeFactor + 0.008 * speedMul);
+  } else {
+    fleeFactor = Math.max(0, fleeFactor - 0.015 * speedMul);
+  }
+
   // ground animals BEFORE flowers so flowers cover their feet naturally
-  squirrels.forEach(sq => { sq.update(speedMul); sq.draw(ctx); });
-  rabbits.forEach(rb => { rb.update(speedMul); rb.draw(ctx); });
+  if (fleeFactor < 0.01) {
+    squirrels.forEach(sq => { sq.update(speedMul); sq.draw(ctx); });
+    rabbits.forEach(rb => { rb.update(speedMul); rb.draw(ctx); });
+  } else {
+    // ground creatures run away naturally (drawn before flowers to keep layering)
+    const urgencyGround = fleeFactor * fleeFactor;
+    squirrels.forEach(sq => {
+      if (!sq._fleeing) {
+        sq._fleeing = true;
+        sq.isPaused = false;
+        sq.dir = sq.x < W * 0.5 ? -1 : 1;
+        sq._origSpeed = sq.speed;
+      }
+      sq.speed = sq._origSpeed * (1.5 + urgencyGround * 1.5);
+      sq.update(speedMul);
+      if (sq.x > -sq.size * 3 && sq.x < W + sq.size * 3) sq.draw(ctx);
+    });
+    rabbits.forEach(rb => {
+      if (!rb._fleeing) {
+        rb._fleeing = true;
+        rb.isPaused = false;
+        rb.isHopping = true;
+        rb.dir = rb.x < W * 0.5 ? -1 : 1;
+        rb._origSpeed = rb.speed;
+      }
+      rb.speed = rb._origSpeed * (1.5 + urgencyGround * 1.5);
+      rb.update(speedMul);
+      if (rb.x > -rb.size * 3 && rb.x < W + rb.size * 3) rb.draw(ctx);
+    });
+  }
 
   flowers.forEach(f => { f.update(speedMul); f.draw(ctx, time); });
 
@@ -2557,14 +2652,6 @@ function animate() {
   dandelionSeeds.forEach(d => { d.update(speedMul); d.draw(ctx); });
   petals.forEach(p => { p.update(speedMul); p.draw(ctx); });
 
-  // flying creatures: visible normally, flee gradually in rain/storm
-  // fleeFactor ramps up smoothly when stormy, back down when clear
-  if (creaturesHiding) {
-    fleeFactor = Math.min(1, fleeFactor + 0.008 * speedMul);
-  } else {
-    fleeFactor = Math.max(0, fleeFactor - 0.015 * speedMul);
-  }
-
   if (fleeFactor < 0.01) {
     // normal behavior
     ladybugs.forEach(l => { l.tryRest(flowers); l.update(speedMul, time); l.draw(ctx); });
@@ -2572,34 +2659,67 @@ function animate() {
     butterflies.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
     dragonflies.forEach(d => { d.update(speedMul); d.draw(ctx); });
     birds.forEach(b => { b.tryPerch(trees); b.update(speedMul); b.draw(ctx); });
+    // clear flee state when weather is fine
+    for (const c of butterflies) c._fleeing = false;
+    for (const c of bees) c._fleeing = false;
+    for (const c of ladybugs) c._fleeing = false;
+    for (const c of dragonflies) c._fleeing = false;
+    for (const c of birds) c._fleeing = false;
+    for (const c of squirrels) c._fleeing = false;
+    for (const c of rabbits) c._fleeing = false;
   } else {
-    // flee — accelerate gradually based on fleeFactor
-    const fleeAmt = fleeFactor * fleeFactor * 6 * speedMul; // quadratic ramp
-    const allFlyers = [
-      ...butterflies.map(c => ({ c, sx: 1.5, sy: 1.0, type: 'bug' })),
-      ...bees.map(c => ({ c, sx: 1.8, sy: 1.2, type: 'bug' })),
-      ...ladybugs.map(c => ({ c, sx: 0.8, sy: 0.5, type: 'bug' })),
-      ...dragonflies.map(c => ({ c, sx: 2.5, sy: 1.8, type: 'fly' })),
-      ...birds.map(c => ({ c, sx: 3.0, sy: 1.5, type: 'bird' })),
-    ];
-    for (const { c, sx, sy, type } of allFlyers) {
-      // break resting on first flee frame
+    const urgency = fleeFactor * fleeFactor;
+
+    const _flee = (c) => {
+      if (c._fleeing) return;
+      c._fleeing = true;
       if (c.resting) c.resting = false;
-      if (type === 'bird' && c.state === 'perched') {
-        if (c.perchTree && c.perchIdx >= 0) {
-          c.perchTree.perchPoints[c.perchIdx].occupied = false;
-        }
-        c.state = 'flying';
-        c.speed = (Math.random() < 0.5 ? 1 : -1) * rand(2, 3.5);
-      }
-      // scatter in varied directions (based on position)
-      const dirX = c.x < W * 0.5 ? -1 : 1;
-      c.x += dirX * fleeAmt * sx;
-      c.y -= fleeAmt * sy;
-      // keep animating wings while fleeing
-      if (c.wingPhase !== undefined) c.wingPhase += (c.wingSpeed || 0.1) * speedMul;
+      const awayX = c.x < W * 0.5 ? -1 : 1;
+      c._fleeAngle = Math.atan2(-1, awayX) + rand(-0.6, 0.6);
+      c._fleeSpeed = rand(0.8, 1.4);
+    };
+
+    for (const c of butterflies) {
+      _flee(c); c.update(speedMul, time);
+      const amt = urgency * 3 * c._fleeSpeed * speedMul;
+      c.x += Math.cos(c._fleeAngle) * amt;
+      c.y += Math.sin(c._fleeAngle) * amt;
       if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
     }
+    for (const c of bees) {
+      _flee(c); c.update(speedMul, time);
+      const amt = urgency * 4 * c._fleeSpeed * speedMul;
+      c.x += Math.cos(c._fleeAngle) * amt;
+      c.y += Math.sin(c._fleeAngle) * amt;
+      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
+    }
+    for (const c of ladybugs) {
+      _flee(c); c.update(speedMul, time);
+      const amt = urgency * 2 * c._fleeSpeed * speedMul;
+      c.x += Math.cos(c._fleeAngle) * amt;
+      c.y += Math.sin(c._fleeAngle) * amt;
+      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
+    }
+    for (const c of dragonflies) {
+      _flee(c); c.update(speedMul);
+      const amt = urgency * 5 * c._fleeSpeed * speedMul;
+      c.x += Math.cos(c._fleeAngle) * amt;
+      c.y += Math.sin(c._fleeAngle) * amt;
+      if (c.y > -150 && c.x > -150 && c.x < W + 150) c.draw(ctx);
+    }
+    for (const b of birds) {
+      if (b.state === 'perched') {
+        if (b.perchTree && b.perchIdx >= 0) b.perchTree.perchPoints[b.perchIdx].occupied = false;
+        b.state = 'flying';
+        b.speed = (Math.random() < 0.5 ? 1 : -1) * rand(2, 3.5);
+      }
+      _flee(b); b.update(speedMul);
+      const amt = urgency * 5 * b._fleeSpeed * speedMul;
+      b.x += Math.cos(b._fleeAngle) * amt;
+      b.y += Math.sin(b._fleeAngle) * amt;
+      if (b.y > -150 && b.x > -150 && b.x < W + 150) b.draw(ctx);
+    }
+    // ground creatures handled in earlier block (before flowers)
   }
 
   // rain on top of everything
