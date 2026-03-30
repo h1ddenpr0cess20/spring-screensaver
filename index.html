@@ -582,7 +582,7 @@ class Butterfly {
   tryRest(flowersArr) {
     if (this.resting || this.restCooldown > 0 || Math.random() > 0.004) return;
     for (const f of flowersArr) {
-      if (f.bloomPhase < 0.7 || f.dead || f.fadeAlpha < 0.5) continue;
+      if (f.bloomPhase < 0.7 || f.dead) continue;
       const tipX = f.x + f.stemCurve * 0.3;
       const tipY = f.groundY - f.stemH;
       const dx = tipX - this.x, dy = tipY - this.y;
@@ -608,7 +608,7 @@ class Butterfly {
         const sway = Math.sin(time * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
         this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3;
         this.y = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.3;
-        if (this.restFlower.dead || this.restFlower.fadeAlpha < 0.3) {
+        if (this.restFlower.dead) {
           this.resting = false;
           this.restCooldown = rand(100, 300);
         }
@@ -1145,28 +1145,41 @@ class Bee {
     this.restDuration = rand(80, 250);
     this.restFlower = null;
     this.restCooldown = 0;
+    this.targetFlower = null;
+    const groundLevel = this.screenH * 0.85;
     if (initial) {
       this.x = rand(0, this.screenW);
-      this.y = rand(this.screenH * 0.45, this.screenH * 0.82);
+      this.y = rand(groundLevel - 80, groundLevel);
     } else {
       this.x = rand(0, 1) < 0.5 ? -this.size * 3 : this.screenW + this.size * 3;
-      this.y = rand(this.screenH * 0.45, this.screenH * 0.82);
+      this.y = rand(groundLevel - 80, groundLevel);
     }
   }
   tryRest(flowersArr) {
-    if (this.resting || this.restCooldown > 0 || Math.random() > 0.006) return;
-    for (const f of flowersArr) {
-      if (f.bloomPhase < 0.7 || f.dead || f.fadeAlpha < 0.5) continue;
-      const tipX = f.x + f.stemCurve * 0.3;
-      const tipY = f.groundY - f.stemH;
+    if (this.resting || this.restCooldown > 0) return;
+    // pick a target flower to fly toward
+    if (!this.targetFlower && Math.random() < 0.015) {
+      for (const f of flowersArr) {
+        if (f.bloomPhase < 0.7 || f.dead) continue;
+        const dx = f.x - this.x, dy = (f.groundY - f.stemH) - this.y;
+        if (dx * dx + dy * dy < 250 * 250) {
+          this.targetFlower = f;
+          break;
+        }
+      }
+    }
+    // land if close enough
+    if (this.targetFlower && !this.targetFlower.dead) {
+      const tipX = this.targetFlower.x + this.targetFlower.stemCurve * 0.3;
+      const tipY = this.targetFlower.groundY - this.targetFlower.stemH;
       const dx = tipX - this.x, dy = tipY - this.y;
-      if (dx * dx + dy * dy < 120 * 120) {
+      if (dx * dx + dy * dy < 15 * 15) {
         this.resting = true;
         this.restTimer = 0;
-        this.restFlower = f;
-        this.x = tipX + rand(-f.petalSize * 0.3, f.petalSize * 0.3);
-        this.y = tipY - f.petalSize * 0.2;
-        return;
+        this.restFlower = this.targetFlower;
+        this.targetFlower = null;
+        this.x = tipX + rand(-this.restFlower.petalSize * 0.3, this.restFlower.petalSize * 0.3);
+        this.y = tipY - this.restFlower.petalSize * 0.2;
       }
     }
   }
@@ -1175,12 +1188,12 @@ class Bee {
 
     if (this.resting) {
       this.restTimer += speedMul;
-      this.wingPhase += this.wingSpeed * 0.15 * speedMul; // slow buzz
+      this.wingPhase += this.wingSpeed * 0.15 * speedMul;
       if (this.restFlower) {
         const sway = Math.sin((time || 0) * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
         this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3 + rand(-0.3, 0.3);
         this.y = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.2;
-        if (this.restFlower.dead || this.restFlower.fadeAlpha < 0.3) {
+        if (this.restFlower.dead) {
           this.resting = false;
           this.restCooldown = rand(60, 150);
         }
@@ -1195,10 +1208,28 @@ class Bee {
 
     const s = this.speed * speedMul;
     this.wanderPhase += 0.02 * speedMul;
-    this.x += (Math.sin(this.wanderPhase * 1.3) * 2.0 + windX * 0.2) * s;
-    this.y += (Math.sin(this.wanderPhase * 1.7 + this.buzzOffset) * 1.5 + Math.sin(this.wanderPhase * 3.1) * 0.5) * s * 0.5;
-    this.y = Math.max(this.screenH * 0.35, Math.min(this.screenH * 0.9, this.y));
     this.wingPhase += this.wingSpeed * speedMul;
+
+    // fly toward target flower with buzzy movement
+    if (this.targetFlower && (this.targetFlower.dead || this.targetFlower.wiltProgress > 0.5)) {
+      this.targetFlower = null;
+    }
+    if (this.targetFlower) {
+      const tx = this.targetFlower.x + this.targetFlower.stemCurve * 0.3;
+      const ty = this.targetFlower.groundY - this.targetFlower.stemH;
+      const dx = tx - this.x, dy = ty - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > 3) {
+        this.x += (dx / dist) * s * 1.8 + Math.sin(this.wanderPhase * 3) * s * 0.4;
+        this.y += (dy / dist) * s * 1.8 + Math.sin(this.wanderPhase * 4 + this.buzzOffset) * s * 0.3;
+      }
+    } else {
+      // buzzy wander near ground
+      this.x += (Math.sin(this.wanderPhase * 1.3) * 1.5 + windX * 0.2) * s;
+      this.y += Math.sin(this.wanderPhase * 1.7 + this.buzzOffset) * 0.5 * s;
+    }
+    const groundLevel = this.screenH * 0.85;
+    this.y = Math.max(groundLevel - 100, Math.min(groundLevel + 5, this.y));
     const margin = this.size * 5;
     if (this.x < -margin || this.x > this.screenW + margin) {
       this.reset(false);
@@ -1293,12 +1324,14 @@ class Ladybug {
         r: rand(0.06, 0.12)
       });
     }
+    // ladybugs stay near the ground/flower level
+    const groundLevel = this.screenH * 0.85;
     if (initial) {
       this.x = rand(0, this.screenW);
-      this.y = rand(this.screenH * 0.7, this.screenH * 0.92);
+      this.y = rand(groundLevel - 60, groundLevel + 10);
     } else {
       this.x = rand(0, 1) < 0.5 ? -this.size * 3 : this.screenW + this.size * 3;
-      this.y = rand(this.screenH * 0.7, this.screenH * 0.92);
+      this.y = rand(groundLevel - 60, groundLevel + 10);
     }
     this.wingPhase = rand(0, TAU);
     this.wingSpeed = rand(0.12, 0.2);
@@ -1307,21 +1340,33 @@ class Ladybug {
     this.restDuration = rand(200, 600);
     this.restFlower = null;
     this.restCooldown = 0;
+    this.targetFlower = null;
   }
   tryRest(flowersArr) {
-    if (this.resting || this.restCooldown > 0 || Math.random() > 0.003) return;
-    for (const f of flowersArr) {
-      if (f.bloomPhase < 0.7 || f.dead || f.fadeAlpha < 0.5) continue;
-      const tipX = f.x + f.stemCurve * 0.3;
-      const tipY = f.groundY - f.stemH;
+    if (this.resting || this.restCooldown > 0) return;
+    // pick a target flower to fly toward
+    if (!this.targetFlower && Math.random() < 0.01) {
+      for (const f of flowersArr) {
+        if (f.bloomPhase < 0.7 || f.dead) continue;
+        const dx = f.x - this.x, dy = (f.groundY - f.stemH) - this.y;
+        if (dx * dx + dy * dy < 200 * 200) {
+          this.targetFlower = f;
+          break;
+        }
+      }
+    }
+    // land if close enough to target
+    if (this.targetFlower && !this.targetFlower.dead) {
+      const tipX = this.targetFlower.x + this.targetFlower.stemCurve * 0.3;
+      const tipY = this.targetFlower.groundY - this.targetFlower.stemH;
       const dx = tipX - this.x, dy = tipY - this.y;
-      if (dx * dx + dy * dy < 100 * 100) {
+      if (dx * dx + dy * dy < 15 * 15) {
         this.resting = true;
         this.restTimer = 0;
-        this.restFlower = f;
-        this.x = tipX + rand(-f.petalSize * 0.4, f.petalSize * 0.4);
+        this.restFlower = this.targetFlower;
+        this.targetFlower = null;
+        this.x = tipX + rand(-this.restFlower.petalSize * 0.4, this.restFlower.petalSize * 0.4);
         this.y = tipY;
-        return;
       }
     }
   }
@@ -1334,7 +1379,7 @@ class Ladybug {
         const sway = Math.sin((time || 0) * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
         this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3 + rand(-0.2, 0.2);
         this.y = this.restFlower.groundY - this.restFlower.stemH;
-        if (this.restFlower.dead || this.restFlower.fadeAlpha < 0.3) {
+        if (this.restFlower.dead) {
           this.resting = false;
           this.restCooldown = rand(100, 300);
         }
@@ -1349,10 +1394,28 @@ class Ladybug {
 
     const s = this.speed * speedMul;
     this.wanderPhase += 0.012 * speedMul;
-    this.x += (Math.sin(this.wanderPhase * 0.8) * 0.8 + windX * 0.15) * s;
-    this.y += (Math.cos(this.wanderPhase * 0.6) * 0.3 + windY * 0.05) * s;
-    this.y = Math.max(this.screenH * 0.6, Math.min(this.screenH * 0.95, this.y));
     this.wingPhase += this.wingSpeed * speedMul;
+
+    // fly toward a nearby flower, with slight wobble
+    if (this.targetFlower && (this.targetFlower.dead || this.targetFlower.wiltProgress > 0.5)) {
+      this.targetFlower = null;
+    }
+    if (this.targetFlower) {
+      const tx = this.targetFlower.x + this.targetFlower.stemCurve * 0.3;
+      const ty = this.targetFlower.groundY - this.targetFlower.stemH;
+      const dx = tx - this.x, dy = ty - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > 3) {
+        this.x += (dx / dist) * s * 1.5 + Math.sin(this.wanderPhase) * s * 0.3;
+        this.y += (dy / dist) * s * 1.5 + Math.cos(this.wanderPhase * 0.7) * s * 0.2;
+      }
+    } else {
+      // gentle wander near ground level until we find a flower
+      this.x += (Math.sin(this.wanderPhase * 0.8) * 0.6 + windX * 0.15) * s;
+      this.y += Math.cos(this.wanderPhase * 0.6) * 0.2 * s;
+    }
+    const groundLevel = this.screenH * 0.85;
+    this.y = Math.max(groundLevel - 80, Math.min(groundLevel + 15, this.y));
     const margin = this.size * 5;
     if (this.x < -margin || this.x > this.screenW + margin) {
       this.reset(false);
@@ -1443,10 +1506,10 @@ class Dragonfly {
     this.wanderPhase = rand(0, TAU);
     if (initial) {
       this.x = rand(0, this.screenW);
-      this.y = rand(this.screenH * 0.05, this.screenH * 0.5);
+      this.y = rand(this.screenH * 0.55, this.screenH * 0.8);
     } else {
       this.x = rand(0, 1) < 0.5 ? -this.size * 4 : this.screenW + this.size * 4;
-      this.y = rand(this.screenH * 0.05, this.screenH * 0.5);
+      this.y = rand(this.screenH * 0.55, this.screenH * 0.8);
     }
   }
   update(speedMul) {
@@ -1454,10 +1517,10 @@ class Dragonfly {
     this.wanderPhase += 0.018 * speedMul;
     this.x += (Math.sin(this.wanderPhase * 0.5) * 2.5 + windX * 0.25) * s;
     this.y += Math.sin(this.wanderPhase * 1.2) * 0.8 * s;
+    this.y = Math.max(this.screenH * 0.45, Math.min(this.screenH * 0.85, this.y));
     this.wingPhase += this.wingSpeed * speedMul;
     const margin = this.size * 5;
-    if (this.x < -margin || this.x > this.screenW + margin ||
-        this.y < -margin || this.y > this.screenH + margin) {
+    if (this.x < -margin || this.x > this.screenW + margin) {
       this.reset(false);
     }
   }
@@ -1718,17 +1781,40 @@ class Cloud {
     this.reset(true);
   }
   reset(initial) {
-    this.size = rand(80, 200);
+    this.size = rand(100, 240);
     this.speed = rand(0.1, 0.4);
-    this.y = rand(20, this.screenH * 0.25);
-    this.alpha = rand(0.3, 0.6);
-    this.blobCount = Math.floor(rand(3, 7));
+    this.y = rand(20, this.screenH * 0.22);
+    this.alpha = rand(0.35, 0.65);
+    // build a natural cloud shape: flat bottom, puffy top
     this.blobs = [];
-    for (let i = 0; i < this.blobCount; i++) {
+    const w = this.size;
+    const h = this.size * 0.45;
+    // bottom row — wide flat base
+    const baseCount = Math.floor(rand(4, 7));
+    for (let i = 0; i < baseCount; i++) {
+      const t = (i / (baseCount - 1)) - 0.5;
       this.blobs.push({
-        ox: rand(-0.4, 0.4) * this.size,
-        oy: rand(-0.15, 0.15) * this.size,
-        r: rand(0.2, 0.45) * this.size,
+        ox: t * w * 0.8,
+        oy: h * 0.15,
+        r: rand(0.22, 0.32) * w,
+      });
+    }
+    // middle — main puffs
+    const midCount = Math.floor(rand(3, 5));
+    for (let i = 0; i < midCount; i++) {
+      this.blobs.push({
+        ox: rand(-0.35, 0.35) * w,
+        oy: rand(-0.2, 0.05) * h,
+        r: rand(0.25, 0.4) * w,
+      });
+    }
+    // top puffs — irregular bumps
+    const topCount = Math.floor(rand(2, 4));
+    for (let i = 0; i < topCount; i++) {
+      this.blobs.push({
+        ox: rand(-0.3, 0.3) * w,
+        oy: -h * rand(0.3, 0.7),
+        r: rand(0.15, 0.3) * w,
       });
     }
     if (initial) {
@@ -1744,6 +1830,14 @@ class Cloud {
     }
   }
   draw(ctx) {
+    // soft glow base
+    ctx.fillStyle = `rgba(255, 255, 255, ${this.alpha * 0.3})`;
+    for (const b of this.blobs) {
+      ctx.beginPath();
+      ctx.arc(this.x + b.ox, this.y + b.oy, b.r * 1.15, 0, TAU);
+      ctx.fill();
+    }
+    // solid cloud body
     ctx.fillStyle = `rgba(255, 255, 255, ${this.alpha})`;
     for (const b of this.blobs) {
       ctx.beginPath();
@@ -2378,17 +2472,17 @@ function updateWeather(speedMul, W, H) {
   if (weather.timer > weather.duration) {
     weather.timer = 0;
     weather.duration = rand(600, 1500);
-    // pick next weather — weighted toward clear
+    // pick next weather — spring showers are frequent
     const roll = Math.random();
-    if (roll < 0.45) weather.target = WEATHER.CLEAR;
-    else if (roll < 0.7) weather.target = WEATHER.CLOUDY;
-    else if (roll < 0.9) weather.target = WEATHER.RAIN;
+    if (roll < 0.3) weather.target = WEATHER.CLEAR;
+    else if (roll < 0.5) weather.target = WEATHER.CLOUDY;
+    else if (roll < 0.8) weather.target = WEATHER.RAIN;
     else weather.target = WEATHER.STORM;
   }
 
   // smooth transition
   const targetOverlay = [0, 0.2, 0.35, 0.5][weather.target];
-  weather.overlay += (targetOverlay - weather.overlay) * 0.005 * speedMul;
+  weather.overlay += (targetOverlay - weather.overlay) * 0.02 * speedMul;
   weather.current = weather.overlay < 0.1 ? WEATHER.CLEAR :
                     weather.overlay < 0.25 ? WEATHER.CLOUDY :
                     weather.overlay < 0.4 ? WEATHER.RAIN : WEATHER.STORM;
@@ -2536,20 +2630,39 @@ function animate() {
 
   // clouds (more in bad weather)
   clouds.forEach(c => { c.update(speedMul); c.draw(ctx); });
-  // extra storm clouds — draw as slow-drifting layered blobs
+  // dark weather clouds — heavier, darker versions that appear in bad weather
   if (weather.current >= WEATHER.CLOUDY) {
-    ctx.fillStyle = `rgba(100, 105, 115, ${weather.overlay * 0.5})`;
-    for (let i = 0; i < 6; i++) {
-      const cx = (time * 12 + i * W * 0.22) % (W + 400) - 200;
-      const cy = H * 0.06 + i * H * 0.03 + Math.sin(i * 2.7) * H * 0.02;
-      const cr = 70 + (i % 3) * 30 + Math.sin(i * 1.9) * 15;
-      ctx.beginPath();
-      ctx.arc(cx, cy, cr, 0, TAU);
-      ctx.fill();
-      // extra blob overlap for volume
-      ctx.beginPath();
-      ctx.arc(cx + cr * 0.5, cy + cr * 0.15, cr * 0.7, 0, TAU);
-      ctx.fill();
+    const darkAlpha = weather.overlay * 0.6;
+    for (let i = 0; i < 4; i++) {
+      const cx = (time * 8 + i * W * 0.28) % (W + 500) - 250;
+      const cy = H * 0.05 + i * H * 0.035 + Math.sin(i * 2.7) * H * 0.015;
+      const cw = 160 + (i % 3) * 50;
+      // flat bottom, puffy dark mass
+      ctx.fillStyle = `rgba(80, 85, 95, ${darkAlpha * 0.4})`;
+      for (let j = 0; j < 5; j++) {
+        const bx = cx + ((j / 4) - 0.5) * cw * 0.7;
+        const by = cy + Math.sin(j * 1.4 + i) * cw * 0.06;
+        ctx.beginPath();
+        ctx.arc(bx, by, cw * 0.22, 0, TAU);
+        ctx.fill();
+      }
+      ctx.fillStyle = `rgba(70, 75, 85, ${darkAlpha})`;
+      for (let j = 0; j < 4; j++) {
+        const bx = cx + ((j / 3) - 0.5) * cw * 0.5;
+        const by = cy - cw * 0.08 + Math.sin(j * 2.1 + i * 0.7) * cw * 0.05;
+        ctx.beginPath();
+        ctx.arc(bx, by, cw * 0.2, 0, TAU);
+        ctx.fill();
+      }
+      // top bumps
+      ctx.fillStyle = `rgba(90, 95, 105, ${darkAlpha * 0.7})`;
+      for (let j = 0; j < 3; j++) {
+        const bx = cx + ((j / 2) - 0.5) * cw * 0.4;
+        const by = cy - cw * 0.2 + Math.sin(j * 3.1 + i) * cw * 0.04;
+        ctx.beginPath();
+        ctx.arc(bx, by, cw * 0.14, 0, TAU);
+        ctx.fill();
+      }
     }
   }
 
@@ -2571,6 +2684,7 @@ function animate() {
   const farTarget = Math.floor(W / 60);
   while (farHillFlowers.length < farTarget) {
     const x = rand(0, W);
+    if (trees.some(t => Math.abs(t.x - x) < t.trunkW * 2)) continue;
     const gy = H * 0.72 + Math.sin(x * 0.003 + 1) * 40 + Math.sin(x * 0.008) * 20 + rand(5, 50);
     farHillFlowers.push(makeHillFlower(W, H, x, gy, 0.25));
   }
@@ -2583,6 +2697,7 @@ function animate() {
   const midTarget = Math.floor(W / 45);
   while (midHillFlowers.length < midTarget) {
     const x = rand(0, W);
+    if (trees.some(t => Math.abs(t.x - x) < t.trunkW * 2)) continue;
     const gy = H * 0.78 + Math.sin(x * 0.004 + 2.5) * 30 + Math.sin(x * 0.01 + 1) * 15 + rand(5, 55);
     midHillFlowers.push(makeHillFlower(W, H, x, gy, 0.35));
   }
