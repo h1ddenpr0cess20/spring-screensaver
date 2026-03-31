@@ -25,14 +25,16 @@ export function updateWeather(speedMul, W, H) {
     weather.timer = 0;
     weather.duration = rand(400, 1000);
     const roll = Math.random();
-    if (roll < 0.3) weather.target = WEATHER.CLEAR;
-    else if (roll < 0.5) weather.target = WEATHER.CLOUDY;
-    else if (roll < 0.8) weather.target = WEATHER.RAIN;
+    if (roll < 0.4) weather.target = WEATHER.CLEAR;
+    else if (roll < 0.65) weather.target = WEATHER.CLOUDY;
+    else if (roll < 0.9) weather.target = WEATHER.RAIN;
     else weather.target = WEATHER.STORM;
   }
 
   const targetOverlay = [0, 0.2, 0.35, 0.5][weather.target];
-  weather.overlay += (targetOverlay - weather.overlay) * 0.03 * speedMul;
+  // Clear faster than it darkens — storms shouldn't linger after target changes
+  const rate = targetOverlay < weather.overlay ? 0.05 : 0.03;
+  weather.overlay += (targetOverlay - weather.overlay) * rate * speedMul;
   weather.current = weather.overlay < 0.08 ? WEATHER.CLEAR :
                     weather.overlay < 0.18 ? WEATHER.CLOUDY :
                     weather.overlay < 0.32 ? WEATHER.RAIN : WEATHER.STORM;
