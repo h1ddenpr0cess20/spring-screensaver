@@ -1,0 +1,8 @@
+{
+  "name": "spring-screensaver",
+  "type": "module",
+  "scripts": {
+    "build": "npx esbuild js/main.js --bundle --outfile=bundle.js --format=iife",
+    "watch": "npx esbuild js/main.js --bundle --outfile=bundle.js --format=iife --watch"
+  }
+}
