@@ -23,12 +23,11 @@ export function updateWeather(speedMul, W, H) {
   weather.timer += speedMul;
   if (weather.timer > weather.duration) {
     weather.timer = 0;
-    weather.duration = rand(400, 1000);
     const roll = Math.random();
-    if (roll < 0.4) weather.target = WEATHER.CLEAR;
-    else if (roll < 0.65) weather.target = WEATHER.CLOUDY;
-    else if (roll < 0.9) weather.target = WEATHER.RAIN;
-    else weather.target = WEATHER.STORM;
+    if (roll < 0.4) { weather.target = WEATHER.CLEAR;  weather.duration = rand(1200, 2500); }
+    else if (roll < 0.65) { weather.target = WEATHER.CLOUDY; weather.duration = rand(600, 1200); }
+    else if (roll < 0.9) { weather.target = WEATHER.RAIN;   weather.duration = rand(400, 800);  }
+    else                  { weather.target = WEATHER.STORM;  weather.duration = rand(300, 600);  }
   }
 
   const targetOverlay = [0, 0.2, 0.35, 0.5][weather.target];
