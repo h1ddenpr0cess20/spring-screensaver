@@ -23,6 +23,7 @@ export class Butterfly {
     this.baseSpeedX = rand(-0.3, 0.5);
     this.baseSpeedY = rand(-0.4, -0.1);
     this.resting = false;
+    this.approaching = false;
     this.restTimer = 0;
     this.restDuration = rand(150, 500);
     this.restFlower = null;
@@ -39,18 +40,15 @@ export class Butterfly {
     }
   }
   tryRest(flowersArr) {
-    if (this.resting || this.restCooldown > 0 || Math.random() > 0.004) return;
+    if (this.resting || this.approaching || this.restCooldown > 0 || Math.random() > 0.004) return;
     for (const f of flowersArr) {
       if (f.bloomPhase < 0.7 || f.dead) continue;
       const tipX = f.x + f.stemCurve * 0.3;
       const tipY = f.groundY - f.stemH;
       const dx = tipX - this.x, dy = tipY - this.y;
       if (dx * dx + dy * dy < 150 * 150) {
-        this.resting = true;
-        this.restTimer = 0;
+        this.approaching = true;
         this.restFlower = f;
-        this.x = tipX;
-        this.y = tipY - f.petalSize * 0.3;
         return;
       }
     }
@@ -64,9 +62,31 @@ export class Butterfly {
         const sway = Math.sin(time * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
         this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3;
         this.y = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.3;
-        if (this.restFlower.dead) { this.resting = false; this.restCooldown = rand(100, 300); }
+        if (this.restFlower.dead) { this.resting = false; this.approaching = false; this.restCooldown = rand(100, 300); }
       }
-      if (this.restTimer > this.restDuration) { this.resting = false; this.restCooldown = rand(100, 300); this.restDuration = rand(150, 500); }
+      if (this.restTimer > this.restDuration) { this.resting = false; this.approaching = false; this.restCooldown = rand(100, 300); this.restDuration = rand(150, 500); }
+      return;
+    }
+    if (this.approaching && this.restFlower) {
+      if (this.restFlower.dead) { this.approaching = false; this.restFlower = null; this.restCooldown = rand(100, 300); }
+      else {
+        const tipX = this.restFlower.x + this.restFlower.stemCurve * 0.3;
+        const tipY = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.3;
+        const dx = tipX - this.x, dy = tipY - this.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 3) {
+          this.approaching = false;
+          this.resting = true;
+          this.restTimer = 0;
+          this.x = tipX;
+          this.y = tipY;
+        } else {
+          const approach = Math.min(1.8, dist * 0.05) * speedMul;
+          this.x += (dx / dist) * approach;
+          this.y += (dy / dist) * approach;
+        }
+        this.wingPhase += this.wingSpeed * 0.5 * speedMul;
+      }
       return;
     }
     const s = this.speed * speedMul;
@@ -269,6 +289,17 @@ export class Bird {
   }
   tryPerch(treesArr) {
     if (this.state !== 'flying' || Math.random() > 0.003) return;
+    // Try ground landing
+    if (Math.random() < 0.4) {
+      const groundY = this.screenH * 0.85 + Math.sin(this.x * 0.005 + 4) * 20 + Math.sin(this.x * 0.015) * 8;
+      if (this.y < groundY - 30) {
+        this.state = 'landing';
+        this.perchTarget = { x: this.x + (this.speed > 0 ? 1 : -1) * rand(20, 80), y: groundY - this.size * 0.3 };
+        this.perchTree = null;
+        this.perchIdx = -1;
+        return;
+      }
+    }
     for (const tree of treesArr) {
       for (let i = 0; i < tree.perchPoints.length; i++) {
         if (!tree.perchPoints[i].occupied) {
@@ -296,7 +327,8 @@ export class Bird {
         if (this.perchTree && this.perchIdx >= 0) this.perchTree.perchPoints[this.perchIdx].occupied = false;
         this.perchTree = null;
         this.perchIdx = -1;
-        this.speed = (Math.random() < 0.5 ? 1 : -1) * rand(1.5, 3.5);
+        const dir = this.speed > 0 ? 1 : -1;
+        this.speed = dir * rand(1.5, 3.5);
       }
       return;
     }
@@ -383,18 +415,20 @@ export class Bird {
     const s = this.size;
     const dir = this.speed > 0 ? 1 : -1;
     const perched = this.state === 'perched';
-    const flapAngle = perched ? -0.6 : (this.isGliding ? -0.15 : Math.sin(this.wingPhase) * 0.45);
+    const flapAngle = perched ? 0.4 : (this.isGliding ? -0.15 : Math.sin(this.wingPhase) * 0.45);
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.scale(dir, 1);
-    ctx.save();
-    ctx.translate(-s * 0.1, -s * 0.15);
-    this.drawWing(ctx, s, -0.2 + flapAngle, false);
-    ctx.restore();
-    ctx.save();
-    ctx.translate(s * 0.1, -s * 0.15);
-    this.drawWing(ctx, s, -0.2 + flapAngle, true);
-    ctx.restore();
+    if (!perched) {
+      ctx.save();
+      ctx.translate(-s * 0.1, -s * 0.15);
+      this.drawWing(ctx, s, -0.2 + flapAngle, false);
+      ctx.restore();
+      ctx.save();
+      ctx.translate(s * 0.1, -s * 0.15);
+      this.drawWing(ctx, s, -0.2 + flapAngle, true);
+      ctx.restore();
+    }
     const bodyGrad = ctx.createRadialGradient(-s * 0.05, -s * 0.05, 0, 0, 0, s * 0.4);
     bodyGrad.addColorStop(0, this.breastColor);
     bodyGrad.addColorStop(1, this.bodyColor);
@@ -461,6 +495,7 @@ export class Bee {
     this.restFlower = null;
     this.restCooldown = 0;
     this.targetFlower = null;
+    this._restOffsetX = 0;
     const groundLevel = this.screenH * 0.85;
     if (initial) {
       this.x = rand(0, this.screenW);
@@ -485,7 +520,8 @@ export class Bee {
       const dx = tipX - this.x, dy = tipY - this.y;
       if (dx * dx + dy * dy < 15 * 15) {
         this.resting = true; this.restTimer = 0; this.restFlower = this.targetFlower; this.targetFlower = null;
-        this.x = tipX + rand(-this.restFlower.petalSize * 0.3, this.restFlower.petalSize * 0.3);
+        this._restOffsetX = rand(-this.restFlower.petalSize * 0.3, this.restFlower.petalSize * 0.3);
+        this.x = tipX + this._restOffsetX;
         this.y = tipY - this.restFlower.petalSize * 0.2;
       }
     }
@@ -497,7 +533,7 @@ export class Bee {
       this.wingPhase += this.wingSpeed * 0.15 * speedMul;
       if (this.restFlower) {
         const sway = Math.sin((time || 0) * 1.0 + this.restFlower.swayOffset) * 6 * (this.restFlower.stemH / 140);
-        this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3 + rand(-0.3, 0.3);
+        this.x = this.restFlower.x + sway + this.restFlower.stemCurve * 0.3 + this._restOffsetX;
         this.y = this.restFlower.groundY - this.restFlower.stemH - this.restFlower.petalSize * 0.2;
         if (this.restFlower.dead) { this.resting = false; this.restCooldown = rand(60, 150); }
       }

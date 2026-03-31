@@ -34,19 +34,35 @@ function buildTerrainCache(W, H) {
 
 // Grass: redrawn to offscreen every N frames using the current wind/time
 let grassCache = null;
+let backHillGrassCache = null;
+let midHillGrassCache = null;
 let grassCacheW = 0, grassCacheH = 0;
 let grassFrameCounter = 0;
 const GRASS_REDRAW_INTERVAL = 3; // redraw grass every 3 frames (~20fps for grass)
 
-function buildGrassCache(W, H) {
-  if (!grassCache || grassCacheW !== W || grassCacheH !== H) {
+function ensureGrassCaches(W, H) {
+  if (grassCacheW !== W || grassCacheH !== H) {
     grassCache = new OffscreenCanvas(W, H);
+    backHillGrassCache = new OffscreenCanvas(W, H);
+    midHillGrassCache = new OffscreenCanvas(W, H);
     grassCacheW = W;
     grassCacheH = H;
   }
+}
+
+function buildGrassCache(W, H) {
+  ensureGrassCaches(W, H);
   const gc = grassCache.getContext('2d');
   gc.clearRect(0, 0, W, H);
   grass.forEach(g => g.draw(gc, time));
+
+  const bgc = backHillGrassCache.getContext('2d');
+  bgc.clearRect(0, 0, W, H);
+  backHillGrass.forEach(g => g.draw(bgc, time));
+
+  const mgc = midHillGrassCache.getContext('2d');
+  mgc.clearRect(0, 0, W, H);
+  midHillGrass.forEach(g => g.draw(mgc, time));
 }
 
 /* ── Cached sky gradient ── */
@@ -68,7 +84,7 @@ function getSkyGrad(W, H) {
 let butterflies = [], bees = [], ladybugs = [], dragonflies = [], birds = [];
 let squirrels = [], rabbits = [];
 let petals = [], dandelionSeeds = [], particles = [];
-let flowers = [], grass = [], clouds = [], sunRays = [], trees = [];
+let flowers = [], grass = [], backHillGrass = [], midHillGrass = [], clouds = [], sunRays = [], trees = [];
 let farHillFlowers = [], midHillFlowers = [];
 
 let speedMul = 1;
@@ -126,6 +142,22 @@ function resize() {
     grass.push(new GrassBlade(x, localGround, rand(15, 50)));
   }
 
+  backHillGrass = [];
+  for (let x = 0; x < W; x += rand(4, 12)) {
+    const gy = H * 0.72 + Math.sin(x * 0.003 + 1) * 40 + Math.sin(x * 0.008) * 20;
+    const g = new GrassBlade(x, gy, rand(5, 16));
+    g.baseWidth = rand(0.5, 2);
+    backHillGrass.push(g);
+  }
+
+  midHillGrass = [];
+  for (let x = 0; x < W; x += rand(3, 10)) {
+    const gy = H * 0.78 + Math.sin(x * 0.004 + 2.5) * 30 + Math.sin(x * 0.01 + 1) * 15;
+    const g = new GrassBlade(x, gy, rand(8, 22));
+    g.baseWidth = rand(0.8, 2.5);
+    midHillGrass.push(g);
+  }
+
   weather.raindrops = [];
   skyGrad = null; // invalidate gradient cache on resize
 }
@@ -143,7 +175,7 @@ speedInput.addEventListener('input', () => {
 function animate() {
   const dt = 1 / 60;
   time += dt * speedMul;
-  updateWind(dt * speedMul);
+  updateWind(dt * speedMul, weather.overlay);
   updateWeather(speedMul, canvas.width, canvas.height);
   advanceSkyPhase(speedMul);
 
@@ -192,6 +224,9 @@ function animate() {
     drawBackHills(ctx, W, H);
   }
 
+  /* ── Back hill grass ── */
+  if (backHillGrassCache) ctx.drawImage(backHillGrassCache, 0, 0);
+
   /* ── Far hill flowers ── */
   for (let i = farHillFlowers.length - 1; i >= 0; i--) {
     if (farHillFlowers[i].dead) farHillFlowers.splice(i, 1);
@@ -204,6 +239,9 @@ function animate() {
     farHillFlowers.push(makeHillFlower(W, H, x, gy, 0.25));
   }
   farHillFlowers.forEach(f => { f.update(speedMul); f.draw(ctx, time); });
+
+  /* ── Mid hill grass ── */
+  if (midHillGrassCache) ctx.drawImage(midHillGrassCache, 0, 0);
 
   /* ── Mid hill flowers ── */
   for (let i = midHillFlowers.length - 1; i >= 0; i--) {
@@ -270,6 +308,12 @@ function animate() {
     });
   }
 
+  /* ── Birds: update all, draw perched ones behind flowers ── */
+  if (fleeFactor < 0.01) {
+    birds.forEach(b => { b.tryPerch(trees); b.update(speedMul); });
+  }
+  birds.forEach(b => { if (b.state === 'perched') b.draw(ctx); });
+
   /* ── Flowers ── */
   flowers.forEach(f => { f.update(speedMul); f.draw(ctx, time); });
 
@@ -284,7 +328,7 @@ function animate() {
     bees.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
     butterflies.forEach(b => { b.tryRest(flowers); b.update(speedMul, time); b.draw(ctx); });
     dragonflies.forEach(d => { d.update(speedMul); d.draw(ctx); });
-    birds.forEach(b => { b.tryPerch(trees); b.update(speedMul); b.draw(ctx); });
+    birds.forEach(b => { if (b.state !== 'perched') b.draw(ctx); });
     for (const c of [...butterflies, ...bees, ...ladybugs, ...dragonflies, ...birds, ...squirrels, ...rabbits]) c._fleeing = false;
   } else {
     const urgency = fleeFactor * fleeFactor;
@@ -312,9 +356,16 @@ function animate() {
       if (b.state === 'perched') {
         if (b.perchTree && b.perchIdx >= 0) b.perchTree.perchPoints[b.perchIdx].occupied = false;
         b.state = 'flying';
-        b.speed = (Math.random() < 0.5 ? 1 : -1) * rand(2, 3.5);
+        const dir = b.speed > 0 ? 1 : -1;
+        b.speed = dir * rand(2, 3.5);
       }
-      _fleeMove(b, 5);
+      _flee(b);
+      const amt = urgency * 5 * b._fleeSpeed * speedMul;
+      b.x += Math.cos(b._fleeAngle) * amt;
+      b.y += Math.sin(b._fleeAngle) * amt;
+      b.speed = Math.cos(b._fleeAngle) >= 0 ? Math.abs(b.speed) : -Math.abs(b.speed);
+      b.wingPhase += b.wingSpeed * speedMul;
+      if (b.y > -150 && b.x > -150 && b.x < W + 150) b.draw(ctx);
     }
   }
 
