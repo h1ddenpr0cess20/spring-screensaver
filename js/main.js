@@ -36,7 +36,7 @@ function buildTerrainCache(W, H) {
 let grassCache = null;
 let grassCacheW = 0, grassCacheH = 0;
 let grassFrameCounter = 0;
-const GRASS_REDRAW_INTERVAL = 2; // redraw grass every 2 frames (~30fps for grass)
+const GRASS_REDRAW_INTERVAL = 3; // redraw grass every 3 frames (~20fps for grass)
 
 function buildGrassCache(W, H) {
   if (!grassCache || grassCacheW !== W || grassCacheH !== H) {

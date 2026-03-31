@@ -42,6 +42,10 @@ export class Flower {
     this.maxAge = rand(800, 1800);
     this.wiltDuration = rand(120, 250);
     this.dead = false;
+    // Bloom sprite cache — avoids redrawing petals every frame
+    this._bloomSprite = null;
+    this._cachedBloom = -1;
+    this._cachedWilt = -1;
   }
   _pickHue() {
     const hues = {
@@ -89,6 +93,35 @@ export class Flower {
       this.wiltProgress = 0;
     }
   }
+  _rebuildBloomSprite(time) {
+    const w = this.wiltProgress || 0;
+    const bloom = this.bloomPhase * (1 - w * 0.4);
+    const ps = this.petalSize * bloom;
+    if (ps < 0.5) { this._bloomSprite = null; return; }
+
+    const pad = Math.ceil(ps * 2.2);
+    const size = pad * 2;
+    if (!this._bloomSprite || this._bloomSprite.width !== size) {
+      this._bloomSprite = new OffscreenCanvas(size, size);
+    }
+    const sc = this._bloomSprite.getContext('2d');
+    sc.clearRect(0, 0, size, size);
+    sc.save();
+    sc.translate(pad, pad);
+    switch (this.type) {
+      case 'daisy': case 'wild': this._drawDaisy(sc, ps, bloom, time); break;
+      case 'tulip': this._drawTulip(sc, ps, bloom); break;
+      case 'rose': this._drawRose(sc, ps, bloom); break;
+      case 'sunflower': this._drawSunflower(sc, ps, bloom, time); break;
+      case 'poppy': this._drawPoppy(sc, ps, bloom); break;
+      case 'bell': this._drawBell(sc, ps, bloom, time); break;
+    }
+    sc.restore();
+
+    this._cachedBloom = this.bloomPhase;
+    this._cachedWilt = w;
+  }
+
   draw(ctx, time) {
     ctx.save();
     const w = this.wiltProgress || 0;
@@ -98,6 +131,7 @@ export class Flower {
     const tipX = this.x + sway + this.stemCurve * 0.3 + droopX;
     const tipY = this.groundY - this.stemH + droopY;
 
+    // Stem (cheap — 2 quadratic curves)
     ctx.strokeStyle = `hsl(${this.stemHue}, 55%, 28%)`;
     ctx.lineWidth = this.stemWidth;
     ctx.lineCap = 'round';
@@ -113,10 +147,11 @@ export class Flower {
     ctx.quadraticCurveTo(tipX - sway * 0.1, tipY + this.stemH * 0.15, tipX, tipY);
     ctx.stroke();
 
+    // Leaves on stem (cheap — 1-3 bezier pairs)
     for (const leaf of this.leafPositions) {
-      const ly = this.groundY - this.stemH * leaf.t;
       const lt = leaf.t;
       const lx = (1-lt)*(1-lt)*this.x + 2*(1-lt)*lt*(this.x + this.stemCurve) + lt*lt*tipX;
+      const ly = this.groundY - this.stemH * lt;
       ctx.fillStyle = `hsl(${this.stemHue + leaf.hueVar}, 50%, ${30 + leaf.litVar}%)`;
       ctx.save();
       ctx.translate(lx, ly);
@@ -136,21 +171,21 @@ export class Flower {
       ctx.restore();
     }
 
+    // Bloom head — blit cached sprite instead of redrawing petals every frame
     if (this.bloomPhase > 0.05) {
-      const bloom = this.bloomPhase * (1 - w * 0.4);
-      const ps = this.petalSize * bloom;
-      ctx.save();
-      ctx.translate(tipX, tipY);
-      if (w > 0) ctx.rotate(w * w * 1.2 * (this.stemCurve > 0 ? 1 : -1));
-      switch (this.type) {
-        case 'daisy': case 'wild': this._drawDaisy(ctx, ps, bloom, time); break;
-        case 'tulip': this._drawTulip(ctx, ps, bloom, time); break;
-        case 'rose': this._drawRose(ctx, ps, bloom, time); break;
-        case 'sunflower': this._drawSunflower(ctx, ps, bloom, time); break;
-        case 'poppy': this._drawPoppy(ctx, ps, bloom, time); break;
-        case 'bell': this._drawBell(ctx, ps, bloom, time); break;
+      const wiltChanged = Math.abs(w - this._cachedWilt) > 0.04;
+      const bloomChanged = Math.abs(this.bloomPhase - this._cachedBloom) > 0.04;
+      if (!this._bloomSprite || bloomChanged || wiltChanged) {
+        this._rebuildBloomSprite(time);
       }
-      ctx.restore();
+      if (this._bloomSprite) {
+        const pad = this._bloomSprite.width / 2;
+        ctx.save();
+        ctx.translate(tipX, tipY);
+        if (w > 0) ctx.rotate(w * w * 1.2 * (this.stemCurve > 0 ? 1 : -1));
+        ctx.drawImage(this._bloomSprite, -pad, -pad);
+        ctx.restore();
+      }
     }
     ctx.restore();
   }
@@ -393,92 +428,116 @@ export class Tree {
     for (let i = 0; i < 3; i++) {
       this.perchPoints.push({ ox: rand(-0.7, 0.7) * this.canopyR, oy: rand(-0.3, 0.5) * this.canopyR - this.trunkH + this.canopyR * 0.3, occupied: false });
     }
+    // Sprite cache — full tree rendered to offscreen, blitted each frame
+    this._sprite = null;
+    this._spriteFrame = 0;
+    this._spriteTime = -999;
+    // Sprite canvas coords: tree centred at (spriteOriginX, spriteOriginY) within the canvas
+    const sprW = Math.ceil(this.canopyR * 2.4 + 20);
+    const sprH = Math.ceil(this.trunkH + this.canopyR * 1.5 + 20);
+    this._sprW = sprW;
+    this._sprH = sprH;
+    // origin = where this.x,this.groundY maps to inside the sprite
+    this._sprOX = Math.ceil(this.canopyR * 1.2 + 10);
+    this._sprOY = sprH - 10;
+    this._sprite = new OffscreenCanvas(sprW, sprH);
   }
   getPerchWorld(idx) {
     return { x: this.x + this.perchPoints[idx].ox, y: this.groundY + this.perchPoints[idx].oy };
   }
-  draw(ctx, time) {
+  _renderToSprite(time) {
+    const sc = this._sprite.getContext('2d');
+    sc.clearRect(0, 0, this._sprW, this._sprH);
+    // Draw with local coords: tree base at (this._sprOX, this._sprOY)
+    const ox = this._sprOX, oy = this._sprOY;
     const sway = Math.sin(time * 0.4 + this.swayOffset) * 3;
-    const topX = this.x + sway;
-    const topY = this.groundY - this.trunkH;
+    const topX = ox + sway;
+    const topY = oy - this.trunkH;
 
-    ctx.fillStyle = '#5a3a1a';
-    ctx.beginPath();
-    ctx.moveTo(this.x - this.trunkW * 0.5, this.groundY);
-    ctx.lineTo(this.x - this.trunkW * 0.6, this.groundY + 5);
-    ctx.lineTo(this.x + this.trunkW * 0.6, this.groundY + 5);
-    ctx.lineTo(this.x + this.trunkW * 0.5, this.groundY);
-    ctx.lineTo(topX + this.trunkW * 0.25, topY + this.canopyR * 0.3);
-    ctx.lineTo(topX - this.trunkW * 0.25, topY + this.canopyR * 0.3);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(40,25,10,0.3)';
-    ctx.lineWidth = 0.8;
+    sc.fillStyle = '#5a3a1a';
+    sc.beginPath();
+    sc.moveTo(ox - this.trunkW * 0.5, oy);
+    sc.lineTo(ox - this.trunkW * 0.6, oy + 5);
+    sc.lineTo(ox + this.trunkW * 0.6, oy + 5);
+    sc.lineTo(ox + this.trunkW * 0.5, oy);
+    sc.lineTo(topX + this.trunkW * 0.25, topY + this.canopyR * 0.3);
+    sc.lineTo(topX - this.trunkW * 0.25, topY + this.canopyR * 0.3);
+    sc.closePath();
+    sc.fill();
+    sc.strokeStyle = 'rgba(40,25,10,0.3)';
+    sc.lineWidth = 0.8;
     for (let i = 0; i < 5; i++) {
-      const by = this.groundY - this.trunkH * (i + 1) / 6;
-      const bx = this.x + sway * (1 - (i + 1) / 6) * 0.5;
-      ctx.beginPath();
-      ctx.moveTo(bx - this.trunkW * 0.3, by);
-      ctx.quadraticCurveTo(bx, by + this.barkLines[i], bx + this.trunkW * 0.3, by);
-      ctx.stroke();
+      const by = oy - this.trunkH * (i + 1) / 6;
+      const bx = ox + sway * (1 - (i + 1) / 6) * 0.5;
+      sc.beginPath();
+      sc.moveTo(bx - this.trunkW * 0.3, by);
+      sc.quadraticCurveTo(bx, by + this.barkLines[i], bx + this.trunkW * 0.3, by);
+      sc.stroke();
     }
-
-    ctx.strokeStyle = '#4a2e12';
-    ctx.lineWidth = 4;
-    ctx.lineCap = 'round';
-    const branchY = this.groundY - this.trunkH * 0.6;
-    ctx.beginPath();
-    ctx.moveTo(this.x + sway * 0.4, branchY);
-    ctx.quadraticCurveTo(this.x - this.canopyR * 0.5, branchY - 20, this.x - this.canopyR * 0.7 + sway, branchY - 10);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(this.x + sway * 0.4, branchY - this.trunkH * 0.1);
-    ctx.quadraticCurveTo(this.x + this.canopyR * 0.4, branchY - this.trunkH * 0.15 - 15, this.x + this.canopyR * 0.6 + sway, branchY - this.trunkH * 0.1 - 5);
-    ctx.stroke();
+    sc.strokeStyle = '#4a2e12';
+    sc.lineWidth = 4;
+    sc.lineCap = 'round';
+    const branchY = oy - this.trunkH * 0.6;
+    sc.beginPath();
+    sc.moveTo(ox + sway * 0.4, branchY);
+    sc.quadraticCurveTo(ox - this.canopyR * 0.5, branchY - 20, ox - this.canopyR * 0.7 + sway, branchY - 10);
+    sc.stroke();
+    sc.beginPath();
+    sc.moveTo(ox + sway * 0.4, branchY - this.trunkH * 0.1);
+    sc.quadraticCurveTo(ox + this.canopyR * 0.4, branchY - this.trunkH * 0.15 - 15, ox + this.canopyR * 0.6 + sway, branchY - this.trunkH * 0.1 - 5);
+    sc.stroke();
 
     for (const f of this.foliageLayers) {
       const leafSway = Math.sin(time * 0.8 + f.leafPhase) * 2;
       const fx = topX + f.ox + leafSway;
       const fy = topY + f.oy;
       if (f.layer > 0) {
-        ctx.fillStyle = `hsla(${f.hue}, ${f.sat}%, ${f.lit - 8}%, 0.2)`;
-        ctx.beginPath();
-        ctx.ellipse(fx + 2, fy + 3, f.r * 0.9, f.r * 0.7, 0, 0, TAU);
-        ctx.fill();
+        sc.fillStyle = `hsla(${f.hue}, ${f.sat}%, ${f.lit - 8}%, 0.2)`;
+        sc.beginPath();
+        sc.ellipse(fx + 2, fy + 3, f.r * 0.9, f.r * 0.7, 0, 0, TAU);
+        sc.fill();
       }
-      ctx.fillStyle = `hsl(${f.hue}, ${f.sat}%, ${f.lit}%)`;
-      ctx.beginPath();
+      sc.fillStyle = `hsl(${f.hue}, ${f.sat}%, ${f.lit}%)`;
+      sc.beginPath();
       const bumps = 8;
       for (let i = 0; i <= bumps; i++) {
         const a = (i / bumps) * TAU;
         const bumpR = f.r * (0.85 + Math.sin(a * 3 + f.leafPhase) * 0.15);
         const bx = fx + Math.cos(a) * bumpR;
         const by = fy + Math.sin(a) * bumpR * 0.85;
-        if (i === 0) ctx.moveTo(bx, by); else ctx.lineTo(bx, by);
+        if (i === 0) sc.moveTo(bx, by); else sc.lineTo(bx, by);
       }
-      ctx.closePath();
-      ctx.fill();
+      sc.closePath();
+      sc.fill();
       if (f.layer >= 1) {
-        ctx.fillStyle = `hsla(${f.hue + 5}, ${f.sat + 5}%, ${f.lit + 6}%, 0.4)`;
+        sc.fillStyle = `hsla(${f.hue + 5}, ${f.sat + 5}%, ${f.lit + 6}%, 0.4)`;
         for (let i = 0; i < 4; i++) {
           const la = f.leafPhase + i * 1.7;
           const lr = f.r * 0.4;
           const lx = fx + Math.cos(la) * lr;
           const ly = fy + Math.sin(la) * lr * 0.8;
-          ctx.beginPath();
-          ctx.ellipse(lx, ly, f.r * 0.2, f.r * 0.12, la, 0, TAU);
-          ctx.fill();
+          sc.beginPath();
+          sc.ellipse(lx, ly, f.r * 0.2, f.r * 0.12, la, 0, TAU);
+          sc.fill();
         }
       }
     }
-
-    const hlGrad = ctx.createRadialGradient(topX - this.canopyR * 0.3, topY - this.canopyR * 0.3, 0, topX, topY, this.canopyR);
+    const hlGrad = sc.createRadialGradient(topX - this.canopyR * 0.3, topY - this.canopyR * 0.3, 0, topX, topY, this.canopyR);
     hlGrad.addColorStop(0, 'rgba(160,220,80,0.12)');
     hlGrad.addColorStop(0.5, 'rgba(140,200,80,0.05)');
     hlGrad.addColorStop(1, 'rgba(140,200,80,0)');
-    ctx.fillStyle = hlGrad;
-    ctx.beginPath();
-    ctx.arc(topX, topY, this.canopyR * 0.9, 0, TAU);
-    ctx.fill();
+    sc.fillStyle = hlGrad;
+    sc.beginPath();
+    sc.arc(topX, topY, this.canopyR * 0.9, 0, TAU);
+    sc.fill();
+    this._spriteTime = time;
+  }
+
+  draw(ctx, time) {
+    // Redraw sprite every 3 frames (~20fps update for trees — sway is slow/subtle)
+    this._spriteFrame = (this._spriteFrame + 1) % 3;
+    if (this._spriteFrame === 0) this._renderToSprite(time);
+    // Blit: sprite origin (this._sprOX, this._sprOY) maps to (this.x, this.groundY)
+    ctx.drawImage(this._sprite, this.x - this._sprOX, this.groundY - this._sprOY);
   }
 }
